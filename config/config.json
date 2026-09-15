@@ -1,0 +1,201 @@
+{
+  "$schema": "../schemas/guardian.schema.json",
+
+  "enabled": true,
+  "yoloMode": false,
+  "reviewLog": true,
+  "debugLog": false,
+
+  "gate": "side-effect",
+  "extraTools": [],
+
+  "onReviewUnavailable": "deny",
+  "onUnresolvedFacts": "review",
+  "onAskWithoutUI": "deny",
+
+  "reviewer": {
+    "model": "deepseek/deepseek-flash",
+    "timeoutMs": 20000,
+    "maxEvidenceRounds": 3,
+    "evidenceTools": true,
+    "transcript": true,
+    "transcriptBudgetChars": 24000,
+    "maxAllowRiskLevel": "medium"
+  },
+
+  "classifier": {
+    "enabled": false,
+    "model": null,
+    "timeoutMs": 15000,
+    "maxLag": 2
+  },
+
+  "circuitBreaker": {
+    "consecutiveDenials": 3,
+    "recentDenials": 10,
+    "windowSize": 50
+  },
+
+  "cache": {
+    "enabled": true,
+    "ttlMs": 300000,
+    "maxEntries": 200
+  },
+
+  "sessionGrants": {
+    "enabled": true
+  },
+
+  "workingDirectory": {
+    "allowRoots": [],
+    "readOnlyCommands": [
+      "pwd",
+      "ls",
+      "cat",
+      "head",
+      "tail",
+      "wc",
+      "file",
+      "stat",
+      "which",
+      "whoami",
+      "date",
+      "echo",
+      "rg",
+      "grep",
+      "find",
+      "git status",
+      "git diff",
+      "git log",
+      "git show",
+      "git branch",
+      "git remote -v",
+      "node --version",
+      "npm --version",
+      "pnpm --version",
+      "tsc --version"
+    ]
+  },
+
+  "permission": {
+    "read": "allow",
+    "find": "allow",
+    "grep": "allow",
+    "ls": "allow",
+    "write": "review",
+    "edit": "review",
+
+    "path": {
+      "*.env": "deny",
+      "*.env.*": "deny",
+      "*.pem": "deny",
+      "*.key": "deny",
+      "*.p12": "deny",
+      "*.pfx": "deny",
+      "*/.ssh/*": "deny",
+      "*/id_rsa*": "deny",
+      "*/id_ed25519*": "deny",
+      "*/.aws/credentials": "deny",
+      "*/.git-credentials": "deny",
+      "*/.npmrc": "review",
+      "*/.pi/agent/auth.json": "deny",
+      "*/.pi/agent/models.json": "deny",
+      "*/.pi/agent/trust.json": "review"
+    },
+
+    "external_directory": {
+      "*": "review",
+      "*/.pi/agent/skills/*": "allow",
+      "*/.pi/agent/npm/*": "allow",
+      "*/.pi/agent/sessions/*": "allow",
+      "*/.pi/agent/git/*": "allow",
+      "*/node_modules/@earendil-works/*": "allow",
+      "*/dev/null": "allow"
+    },
+
+    "bash": {
+      "rm *": "review",
+      "mv *": "review",
+      "cp -r *": "review",
+      "cp -R *": "review",
+      "truncate *": "review",
+      "shred *": "review",
+      "rmdir *": "review",
+      "ln -sf *": "review",
+      "tee *": "review",
+
+      "git push*": "ask",
+      "git reset --hard *": "ask",
+      "git clean -*": "ask",
+      "git checkout -- *": "ask",
+      "git restore *": "ask",
+      "git rebase *": "ask",
+      "npm publish*": "ask",
+      "npm deprecate *": "ask",
+      "npm install -g *": "ask",
+      "pnpm add -g *": "ask",
+      "pip install *": "ask",
+      "cargo install *": "ask",
+      "gh release *": "ask",
+      "gh repo delete*": "ask",
+      "sudo *": "ask",
+      "doas *": "ask",
+      "curl * | sh": "ask",
+      "curl * | bash": "ask",
+      "wget * | sh": "ask",
+
+      "rm -rf /": "deny",
+      "rm -rf /*": "deny",
+      "rm -rf ~": "deny",
+      "rm -rf ~/*": "deny",
+      "rm -rf $HOME": "deny",
+      "rm -rf $HOME/*": "deny",
+      "rm -fr /": "deny",
+      "rm -fr /*": "deny",
+      "mkfs*": "deny",
+      "dd *of=/dev/*": "deny",
+      "chmod -R 777 /*": "deny",
+      "chown -R * /*": "deny",
+      "shutdown *": "deny",
+      "reboot": "deny",
+      "halt": "deny",
+
+      "rm -rf ./node_modules": "allow",
+      "rm -rf ./dist": "allow",
+      "rm -rf ./build": "allow",
+      "rm -rf ./out": "allow",
+      "rm -rf ./coverage": "allow",
+      "rm -rf ./tmp": "allow",
+      "rm -rf ./.cache": "allow",
+      "rm -rf ./.turbo": "allow",
+      "rm -f ./*.log": "allow"
+    },
+
+    "powershell": {
+      "Remove-Item *": "review",
+      "Move-Item *": "review",
+      "Rename-Item *": "review",
+
+      "ri *": "ask",
+      "del *": "ask",
+      "erase *": "ask",
+      "rd *": "ask",
+      "rmdir *": "ask",
+      "Remove-Item -Recurse *": "ask",
+      "Set-Content *": "ask",
+      "Add-Content *": "ask",
+      "Clear-Content *": "ask",
+      "Out-File *": "ask",
+      "Stop-Computer *": "ask",
+      "Restart-Computer *": "ask",
+      "Set-ExecutionPolicy *": "ask",
+      "New-LocalUser *": "ask",
+
+      "Remove-Item -Recurse -Force C:/*": "deny",
+      "Remove-Item -Recurse -Force $env:SystemRoot*": "deny",
+
+      "Remove-Item -Recurse -Force ./.next": "allow",
+      "Remove-Item -Recurse -Force ./.cache": "allow"
+    }
+  }
+}

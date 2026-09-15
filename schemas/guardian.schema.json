@@ -1,0 +1,287 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/deqiying/pi-permission-guardian/main/schemas/guardian.schema.json",
+  "title": "pi-permission-guardian 配置",
+  "description": "pi-permission-guardian 扩展的配置结构。字段语义见 docs/configuration.md，需求依据见 docs/requirements.md。所有字段均可省略，因为全局层与项目层是合并的，局部配置必须能独立通过校验。",
+  "type": "object",
+  "additionalProperties": false,
+
+  "$defs": {
+    "action": {
+      "enum": ["allow", "deny", "ask", "review"],
+      "title": "动作",
+      "description": "allow=静默放行；deny=直接拒绝；ask=人工确认；review=交评审模型判断"
+    },
+    "actionValue": {
+      "title": "动作或带理由的动作",
+      "oneOf": [
+        { "$ref": "#/$defs/action" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action"],
+          "properties": {
+            "action": { "$ref": "#/$defs/action" },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "description": "在拦截信息中向 agent 展示的理由（FR-10）"
+            }
+          }
+        }
+      ]
+    },
+    "ruleMap": {
+      "type": "object",
+      "title": "模式到动作的映射",
+      "description": "键为 glob 模式（* 跨路径分隔符，? 单字符，结尾 \" *\" 使参数可选）。同一 surface 内后写的规则覆盖先写的（last-match-wins，FR-5）。",
+      "propertyNames": { "minLength": 1 },
+      "additionalProperties": { "$ref": "#/$defs/actionValue" }
+    },
+    "surfaceValue": {
+      "title": "面规则",
+      "oneOf": [
+        { "$ref": "#/$defs/actionValue" },
+        { "$ref": "#/$defs/ruleMap" }
+      ]
+    }
+  },
+
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "本文件的 schema 位置，用于编辑器补全与校验"
+    },
+
+    "enabled": {
+      "type": "boolean",
+      "default": true,
+      "description": "总开关。关闭后 tool_call 直接放行，等同未安装。"
+    },
+    "yoloMode": {
+      "type": "boolean",
+      "default": false,
+      "description": "逃生舱：把所有 ask / review 重写为 allow（FR-53）。开启时状态栏必须显著提示。"
+    },
+    "reviewLog": {
+      "type": "boolean",
+      "default": true,
+      "description": "决策审计日志（JSONL）。每条决策落一行，含来源与依据（FR-43/44）。"
+    },
+    "debugLog": {
+      "type": "boolean",
+      "default": false,
+      "description": "调试日志：额外记录 facts 全文与评审提示词，可能含会话内容，默认关闭。"
+    },
+
+    "gate": {
+      "enum": ["side-effect", "all"],
+      "default": "side-effect",
+      "description": "评估范围（architecture §4.0）。side-effect=全部 pi 内置工具；all=额外包含自定义工具与 MCP 工具。它决定哪些调用进入规则求值，不是哪些会被拦截。"
+    },
+    "extraTools": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "default": [],
+      "description": "在 gate 之外额外评估的工具名，例如 subagent。"
+    },
+
+    "onReviewUnavailable": {
+      "$ref": "#/$defs/action",
+      "default": "deny",
+      "description": "评审不可用（超时 / 模型报错 / 输出非法 / 模型未配置）时的动作（FR-19、§9）。"
+    },
+    "onUnresolvedFacts": {
+      "$ref": "#/$defs/action",
+      "default": "review",
+      "description": "facts 不可信（bash 解析失败、包装器内部不可展开、路径非字面量）时的动作（FR-12、FR-14、FR-15）。"
+    },
+    "onAskWithoutUI": {
+      "$ref": "#/$defs/action",
+      "default": "deny",
+      "description": "需要人工确认但没有交互界面（print / json 模式、后台子代理）时的动作（FR-46）。"
+    },
+
+    "reviewer": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "评审模型配置（FR-19~FR-28）",
+      "properties": {
+        "model": {
+          "type": "string",
+          "minLength": 3,
+          "pattern": "^[^/]+/.+$",
+          "description": "评审模型，格式 \"provider/model-id\"，须为 pi 已配置 provider 下的模型。未配置或无法解析即判为 unavailable（FR-19）。刻意不回退到当前会话模型，以保证审查独立性（D6）。"
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 120000,
+          "default": 20000,
+          "description": "单次评审的硬性 deadline（FR-25）"
+        },
+        "maxEvidenceRounds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8,
+          "default": 3,
+          "description": "评审模型调用只读证据工具自行查证的轮次上限（FR-24）"
+        },
+        "evidenceTools": {
+          "type": "boolean",
+          "default": true,
+          "description": "是否允许评审模型调用只读证据工具（read / grep / find / ls）"
+        },
+        "transcript": {
+          "type": "boolean",
+          "default": true,
+          "description": "是否把会话 transcript 提供给评审模型"
+        },
+        "transcriptBudgetChars": {
+          "type": "integer",
+          "minimum": 2000,
+          "default": 24000,
+          "description": "transcript 的字符预算上限"
+        },
+        "maxAllowRiskLevel": {
+          "enum": ["low", "medium", "high", "critical"],
+          "default": "medium",
+          "description": "风险等级门槛（FR-23）：模型给出 allow 但 riskLevel 高于此值时，不直接放行，转为人工确认。"
+        }
+      }
+    },
+
+    "classifier": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "非阻塞预评分（FR-36~38）。语义是\"先放行、后判定\"，默认关闭（D8）。开启后只会放行、永不拒绝。",
+      "properties": {
+        "enabled": { "type": "boolean", "default": false },
+        "model": {
+          "type": ["string", "null"],
+          "default": null,
+          "description": "缺省复用 reviewer.model"
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1000,
+          "default": 15000
+        },
+        "maxLag": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 20,
+          "default": 2,
+          "description": "评分对应的调用序落后当前超过此值时，快路径失效（FR-37）"
+        }
+      }
+    },
+
+    "circuitBreaker": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "熔断器（FR-34/35）。阈值设为 0 表示关闭该条件。",
+      "properties": {
+        "consecutiveDenials": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "default": 3,
+          "description": "同一轮内连续拒绝达到此值时拦截并提前结束本轮"
+        },
+        "recentDenials": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "default": 10
+        },
+        "windowSize": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200,
+          "default": 50
+        }
+      }
+    },
+
+    "cache": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "判定缓存（FR-31~33）。仅内存，仅缓存确定的 allow / deny，不缓存 unavailable。",
+      "properties": {
+        "enabled": { "type": "boolean", "default": true },
+        "ttlMs": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 300000
+        },
+        "maxEntries": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 200
+        }
+      }
+    },
+
+    "sessionGrants": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "会话授权记忆（FR-29/30）。仅内存，会话结束即失效，不落盘。",
+      "properties": {
+        "enabled": { "type": "boolean", "default": true }
+      }
+    },
+
+    "workingDirectory": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allowRoots": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "default": [],
+          "description": "视为\"内部\"的额外根目录。monorepo 场景可加入兄弟包路径，避免被判定为外部目录。"
+        },
+        "readOnlyCommands": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "default": [],
+          "description": "只读命令白名单（FR-9）：命中即 allow，不产生评审调用。按命令单元的可执行名与参数前缀匹配，例如 \"git status\" 匹配 `git status --short`，不匹配 `git push`。"
+        }
+      }
+    },
+
+    "permission": {
+      "type": "object",
+      "title": "规则表",
+      "description": "按 surface 组织。键可以是 \"*\"、path / external_directory 语法糖、方向键（*_read / *_write）、内置工具名（read / write / edit / find / grep / ls / bash / powershell）或任意已注册工具名。值可以是单个动作，也可以是模式到动作的映射。",
+      "properties": {
+        "*": {
+          "$ref": "#/$defs/surfaceValue",
+          "description": "通用兜底。未设置时按 surface 默认矩阵裁决：读取类 allow，其余 review。一旦设置，会覆盖全部默认值。"
+        },
+        "path": {
+          "$ref": "#/$defs/surfaceValue",
+          "description": "敏感路径（语法糖，展开为 path_read + path_write，方向独立判定）"
+        },
+        "external_directory": {
+          "$ref": "#/$defs/surfaceValue",
+          "description": "工作目录之外（语法糖，展开为 external_directory_read + external_directory_write）"
+        },
+        "path_read": { "$ref": "#/$defs/surfaceValue" },
+        "path_write": { "$ref": "#/$defs/surfaceValue" },
+        "external_directory_read": { "$ref": "#/$defs/surfaceValue" },
+        "external_directory_write": { "$ref": "#/$defs/surfaceValue" },
+        "bash": { "$ref": "#/$defs/surfaceValue" },
+        "powershell": { "$ref": "#/$defs/surfaceValue" },
+        "read": { "$ref": "#/$defs/surfaceValue" },
+        "write": { "$ref": "#/$defs/surfaceValue" },
+        "edit": { "$ref": "#/$defs/surfaceValue" },
+        "find": { "$ref": "#/$defs/surfaceValue" },
+        "grep": { "$ref": "#/$defs/surfaceValue" },
+        "ls": { "$ref": "#/$defs/surfaceValue" }
+      },
+      "additionalProperties": { "$ref": "#/$defs/surfaceValue" }
+    }
+  }
+}

@@ -1,0 +1,21 @@
+# 依赖
+node_modules/
+
+# 参考项目源码（只读对照用，不纳入版本控制）
+reference/
+
+# 构建产物
+dist/
+*.tsbuildinfo
+
+# 本地配置与日志
+.pi/extensions/pi-permission-guardian/config.json
+logs/
+*.log
+
+# 编辑器/系统
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/settings.json
