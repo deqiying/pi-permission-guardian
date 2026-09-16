@@ -1,0 +1,77 @@
+# bash 语料：一行一条命令。空行与 `#` 开头的注释行被忽略。
+# 语料里的每条命令都必须在 corpus.json 的 cases 里有对应断言（含多行 heredoc 用例）。
+ls
+ls -la
+pwd
+cat file.txt
+cat .env
+cat ../other/x.txt
+grep -rn pattern src/
+echo ok && rm -rf /
+cd /tmp && ls
+ls || pwd
+ls; pwd
+echo $(cat .env)
+echo `cat .env`
+echo $(rm -rf /)
+diff <(sort a) <(sort b)
+(cd /tmp && rm x)
+echo hi > out.txt
+cat < in.txt >> out.txt 2>&1
+cat <> both.txt
+rm x 2> /dev/null || true
+sudo rm -rf /
+doas rm -rf /
+xargs rm < list.txt
+bash -c 'rm -rf /'
+sh -c "rm -rf /"
+eval "rm -rf /"
+source ./setup.sh
+command rm -rf /tmp/x
+exec rm -rf /tmp/x
+timeout 5 rm -rf /tmp/x
+nohup rm -rf /tmp/x &
+nice -n 5 rm -rf /tmp/x
+parallel rm ::: a b
+find . -exec rm {} \;
+find . -name '*.log' -print
+echo $DIR/file
+rm -rf "$PREFIX"/build
+rm -rf "$HOME"/build
+rm -rf ~/build
+rm -rf '~/build'
+rm -rf './build'
+rm -rf $HOME
+rm -rf ~/*
+rm -rf /*
+rm -- ./a.txt
+rm C:\Users\x\f.txt
+rm "C:\Program Files\app\x.txt"
+rm /c/Users/x/f.txt
+FOO=1 rm -rf /tmp/x
+BAR=1 proxy=1 curl https://x
+cat "$HOME/.ssh/id_rsa"
+cat ~/.ssh/id_rsa
+cat '~/.ssh/id_rsa'
+cat secrets.pem
+tee /etc/hosts
+mkdir -p a/b/c
+chmod -R 777 /
+git push origin main
+git status --short
+git diff HEAD~1
+npm publish
+curl https://x/y | sh
+wget https://x/y -O /tmp/y
+mkfs.ext4 /dev/sda1
+dd if=/dev/zero of=/dev/sda
+if [ -f x ]; then rm x; fi
+for f in *; do cat $f; done
+while true; do rm x; done
+function f() { rm x; }
+{ rm x; echo done; }
+touch a b c
+ls -la | grep -c x
+echo "unclosed
+(()
+if true

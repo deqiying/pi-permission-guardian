@@ -165,7 +165,7 @@ describe("会话生命周期与 /perm 命令面（M1）", () => {
       "冲突：无",
       "subagentPolicy",
       "subagentCoverage：未识别，使用父策略",
-      "tree-sitter",
+      "bash 解析器",
       "计数器：grants 0",
       "审计日志",
       "失败分支",

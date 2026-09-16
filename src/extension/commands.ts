@@ -2,6 +2,7 @@ import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
 import type { AuditLogger } from "../audit/logger.ts";
 import type { LayerRules } from "../config/normalize.ts";
+import { bashParserStatus } from "../facts/bash/parser.ts";
 import type { GuardianRuntime } from "./state.ts";
 
 /**
@@ -110,10 +111,23 @@ export function renderStatusBar(runtime: GuardianRuntime): string | undefined {
 }
 
 /**
- * `/perm status` 的完整报告（M1 初始合同）。
+ * `/perm status` 的完整报告。
  *
- * TODO(M2)：tree-sitter 行现在只是占位，接入 parser 预热后改成读真实状态。
+ * 全部字段都读运行时真实状态，不猜：配置层状态来自 `loadConfig`，解析器状态来自
+ * `facts/bash/parser`，审计写入计数来自 logger 实例。
  */
+/** bash 解析器状态：就绪时给出语言与 ABI 版本，未就绪或失败时给出原因。 */
+function describeBashParser(): string {
+  const status = bashParserStatus();
+  if (status.state === "ready") {
+    return `bash 解析器：就绪（${status.language ?? "bash"}，ABI ${
+      status.abiVersion ?? "?"
+    }，加载尝试 ${status.attempts} 次）`;
+  }
+  const suffix = status.lastError === undefined ? "" : `：${status.lastError}`;
+  return `bash 解析器：${status.state === "loading" ? "加载中" : "未就绪"}${suffix}（命令会按不可静态展开处理）`;
+}
+
 export function renderStatusReport(
   deps: CommandDeps,
   registry?: ModelRegistryLike,
@@ -187,7 +201,7 @@ export function renderStatusReport(
     } allowSessionGrants=${config.subagentPolicy.allowSessionGrants}`,
   );
   lines.push(`- subagentCoverage：${describeSubagentCoverage(deps)}`);
-  lines.push("- tree-sitter：未预热");
+  lines.push(`- ${describeBashParser()}`);
   lines.push(
     `- 计数器：grants ${runtime.grants.keys.size}｜cache ${runtime.cache.entries.size}｜熔断 连续 ${runtime.breaker.consecutiveDenials} / 窗口 ${runtime.breaker.recentDenials}`,
   );

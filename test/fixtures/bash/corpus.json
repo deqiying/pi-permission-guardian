@@ -1,0 +1,816 @@
+{
+  "//": "bash facts 语料断言。键为命令原文；值中字段按 test/facts/bash-corpus.test.ts 的规则比对，缺省字段视为空。",
+  "context": {
+    "cwd": "/proj/app",
+    "platform": "linux",
+    "home": "/home/u",
+    "roots": [
+      "/proj/app"
+    ],
+    "readOnlyCommands": [
+      "pwd",
+      "ls",
+      "cat",
+      "head",
+      "tail",
+      "wc",
+      "git status",
+      "git diff",
+      "git log",
+      "git show"
+    ]
+  },
+  "cases": {
+    "ls": {
+      "units": [
+        "ls"
+      ],
+      "readOnly": [
+        0
+      ]
+    },
+    "ls -la": {
+      "units": [
+        "ls -la"
+      ],
+      "readOnly": [
+        0
+      ]
+    },
+    "pwd": {
+      "units": [
+        "pwd"
+      ],
+      "readOnly": [
+        0
+      ]
+    },
+    "cat file.txt": {
+      "units": [
+        "cat file.txt"
+      ],
+      "readOnly": [
+        0
+      ],
+      "paths": [
+        "read:file.txt"
+      ]
+    },
+    "cat .env": {
+      "units": [
+        "cat .env"
+      ],
+      "readOnly": [
+        0
+      ],
+      "paths": [
+        "read:.env"
+      ]
+    },
+    "cat ../other/x.txt": {
+      "units": [
+        "cat ../other/x.txt"
+      ],
+      "readOnly": [
+        0
+      ],
+      "paths": [
+        "read:../other/x.txt"
+      ]
+    },
+    "grep -rn pattern src/": {
+      "units": [
+        "grep -rn pattern src/"
+      ],
+      "paths": [
+        "write:src/"
+      ]
+    },
+    "echo ok && rm -rf /": {
+      "units": [
+        "echo ok",
+        "rm -rf /"
+      ],
+      "paths": [
+        "write:/"
+      ]
+    },
+    "cd /tmp && ls": {
+      "units": [
+        "cd /tmp",
+        "ls"
+      ],
+      "readOnly": [
+        1
+      ],
+      "paths": [
+        "read:/tmp"
+      ]
+    },
+    "ls || pwd": {
+      "units": [
+        "ls",
+        "pwd"
+      ],
+      "readOnly": [
+        0,
+        1
+      ]
+    },
+    "ls; pwd": {
+      "units": [
+        "ls",
+        "pwd"
+      ],
+      "readOnly": [
+        0,
+        1
+      ]
+    },
+    "echo $(cat .env)": {
+      "units": [
+        "echo $(cat .env)",
+        "cat .env"
+      ],
+      "unresolvedUnits": [
+        0
+      ],
+      "readOnly": [
+        1
+      ],
+      "paths": [
+        "read:.env"
+      ]
+    },
+    "echo `cat .env`": {
+      "units": [
+        "echo `cat .env`",
+        "cat .env"
+      ],
+      "unresolvedUnits": [
+        0
+      ],
+      "readOnly": [
+        1
+      ],
+      "paths": [
+        "read:.env"
+      ]
+    },
+    "echo $(rm -rf /)": {
+      "units": [
+        "echo $(rm -rf /)",
+        "rm -rf /"
+      ],
+      "unresolvedUnits": [
+        0
+      ],
+      "paths": [
+        "write:$(rm -rf /)",
+        "write:/"
+      ]
+    },
+    "diff <(sort a) <(sort b)": {
+      "units": [
+        "diff <(sort a) <(sort b)",
+        "sort a",
+        "sort b"
+      ],
+      "unresolvedUnits": [
+        0
+      ]
+    },
+    "(cd /tmp && rm x)": {
+      "units": [
+        "cd /tmp",
+        "rm x"
+      ],
+      "paths": [
+        "read:/tmp",
+        "write:x"
+      ]
+    },
+    "echo hi > out.txt": {
+      "units": [
+        "echo hi"
+      ],
+      "paths": [
+        "write:out.txt"
+      ]
+    },
+    "cat < in.txt >> out.txt 2>&1": {
+      "units": [
+        "cat"
+      ],
+      "paths": [
+        "read:in.txt",
+        "write:out.txt"
+      ]
+    },
+    "cat <> both.txt": {
+      "units": [
+        "cat"
+      ],
+      "unresolved": "parse-error",
+      "unresolvedUnits": [
+        0
+      ],
+      "paths": [
+        "read:both.txt"
+      ]
+    },
+    "rm x 2> /dev/null || true": {
+      "units": [
+        "rm x",
+        "true"
+      ],
+      "paths": [
+        "write:x",
+        "write:/dev/null"
+      ]
+    },
+    "sudo rm -rf /": {
+      "units": [
+        "sudo rm -rf /"
+      ],
+      "unresolved": "indirection-wrapper",
+      "unresolvedUnits": [
+        0
+      ],
+      "wrappers": {
+        "0": "indirection"
+      },
+      "paths": [
+        "write:/"
+      ]
+    },
+    "doas rm -rf /": {
+      "units": [
+        "doas rm -rf /"
+      ],
+      "unresolved": "indirection-wrapper",
+      "unresolvedUnits": [
+        0
+      ],
+      "wrappers": {
+        "0": "indirection"
+      },
+      "paths": [
+        "write:/"
+      ]
+    },
+    "xargs rm < list.txt": {
+      "units": [
+        "xargs rm"
+      ],
+      "unresolved": "indirection-wrapper",
+      "unresolvedUnits": [
+        0
+      ],
+      "wrappers": {
+        "0": "indirection"
+      },
+      "paths": [
+        "read:list.txt"
+      ]
+    },
+    "bash -c 'rm -rf /'": {
+      "units": [
+        "bash -c 'rm -rf /'"
+      ],
+      "unresolved": "opaque-wrapper",
+      "unresolvedUnits": [
+        0
+      ],
+      "wrappers": {
+        "0": "opaque"
+      }
+    },
+    "sh -c \"rm -rf /\"": {
+      "units": [
+        "sh -c \"rm -rf /\""
+      ],
+      "unresolved": "opaque-wrapper",
+      "unresolvedUnits": [
+        0
+      ],
+      "wrappers": {
+        "0": "opaque"
+      }
+    },
+    "eval \"rm -rf /\"": {
+      "units": [
+        "eval \"rm -rf /\""
+      ],
+      "unresolved": "opaque-wrapper",
+      "unresolvedUnits": [
+        0
+      ],
+      "wrappers": {
+        "0": "opaque"
+      }
+    },
+    "source ./setup.sh": {
+      "units": [
+        "source ./setup.sh"
+      ],
+      "unresolved": "opaque-wrapper",
+      "unresolvedUnits": [
+        0
+      ],
+      "wrappers": {
+        "0": "opaque"
+      }
+    },
+    "command rm -rf /tmp/x": {
+      "units": [
+        "command rm -rf /tmp/x"
+      ],
+      "unresolved": "indirection-wrapper",
+      "unresolvedUnits": [
+        0
+      ],
+      "wrappers": {
+        "0": "indirection"
+      },
+      "paths": [
+        "write:/tmp/x"
+      ]
+    },
+    "exec rm -rf /tmp/x": {
+      "units": [
+        "exec rm -rf /tmp/x"
+      ],
+      "unresolved": "indirection-wrapper",
+      "unresolvedUnits": [
+        0
+      ],
+      "wrappers": {
+        "0": "indirection"
+      },
+      "paths": [
+        "write:/tmp/x"
+      ]
+    },
+    "timeout 5 rm -rf /tmp/x": {
+      "units": [
+        "timeout 5 rm -rf /tmp/x"
+      ],
+      "unresolved": "indirection-wrapper",
+      "unresolvedUnits": [
+        0
+      ],
+      "wrappers": {
+        "0": "indirection"
+      },
+      "paths": [
+        "write:/tmp/x"
+      ]
+    },
+    "nohup rm -rf /tmp/x &": {
+      "units": [
+        "nohup rm -rf /tmp/x"
+      ],
+      "unresolved": "indirection-wrapper",
+      "unresolvedUnits": [
+        0
+      ],
+      "wrappers": {
+        "0": "indirection"
+      },
+      "paths": [
+        "write:/tmp/x"
+      ]
+    },
+    "nice -n 5 rm -rf /tmp/x": {
+      "units": [
+        "nice -n 5 rm -rf /tmp/x"
+      ],
+      "unresolved": "indirection-wrapper",
+      "unresolvedUnits": [
+        0
+      ],
+      "wrappers": {
+        "0": "indirection"
+      },
+      "paths": [
+        "write:/tmp/x"
+      ]
+    },
+    "parallel rm ::: a b": {
+      "units": [
+        "parallel rm ::: a b"
+      ],
+      "unresolved": "indirection-wrapper",
+      "unresolvedUnits": [
+        0
+      ],
+      "wrappers": {
+        "0": "indirection"
+      }
+    },
+    "find . -exec rm {} \\;": {
+      "units": [
+        "find . -exec rm {} \\;"
+      ],
+      "unresolved": "indirection-wrapper",
+      "unresolvedUnits": [
+        0
+      ],
+      "wrappers": {
+        "0": "indirection"
+      },
+      "paths": [
+        "write:.",
+        "write:\\;"
+      ]
+    },
+    "find . -name '*.log' -print": {
+      "units": [
+        "find . -name '*.log' -print"
+      ],
+      "paths": [
+        "write:."
+      ]
+    },
+    "echo $DIR/file": {
+      "units": [
+        "echo $DIR/file"
+      ],
+      "unresolved": "dynamic-path",
+      "unresolvedUnits": [
+        0
+      ],
+      "paths": [
+        "write:$DIR/file"
+      ]
+    },
+    "rm -rf \"$PREFIX\"/build": {
+      "units": [
+        "rm -rf \"$PREFIX\"/build"
+      ],
+      "unresolved": "dynamic-path",
+      "unresolvedUnits": [
+        0
+      ],
+      "paths": [
+        "write:$PREFIX/build"
+      ]
+    },
+    "rm -rf \"$HOME\"/build": {
+      "units": [
+        "rm -rf \"$HOME\"/build"
+      ],
+      "paths": [
+        "write:/home/u/build"
+      ]
+    },
+    "rm -rf ~/build": {
+      "units": [
+        "rm -rf ~/build"
+      ],
+      "paths": [
+        "write:/home/u/build"
+      ]
+    },
+    "rm -rf '~/build'": {
+      "units": [
+        "rm -rf '~/build'"
+      ],
+      "paths": [
+        "write:~/build"
+      ]
+    },
+    "rm -rf './build'": {
+      "units": [
+        "rm -rf './build'"
+      ],
+      "paths": [
+        "write:./build"
+      ]
+    },
+    "rm -rf $HOME": {
+      "units": [
+        "rm -rf $HOME"
+      ],
+      "paths": [
+        "write:/home/u"
+      ]
+    },
+    "rm -rf ~/*": {
+      "units": [
+        "rm -rf ~/*"
+      ],
+      "paths": [
+        "write:/home/u/*"
+      ]
+    },
+    "rm -rf /*": {
+      "units": [
+        "rm -rf /*"
+      ],
+      "paths": [
+        "write:/*"
+      ]
+    },
+    "rm -- ./a.txt": {
+      "units": [
+        "rm -- ./a.txt"
+      ],
+      "paths": [
+        "write:./a.txt"
+      ]
+    },
+    "rm C:\\Users\\x\\f.txt": {
+      "units": [
+        "rm C:\\Users\\x\\f.txt"
+      ],
+      "paths": [
+        "write:C:\\Users\\x\\f.txt"
+      ]
+    },
+    "rm \"C:\\Program Files\\app\\x.txt\"": {
+      "units": [
+        "rm \"C:\\Program Files\\app\\x.txt\""
+      ],
+      "paths": [
+        "write:C:\\Program Files\\app\\x.txt"
+      ]
+    },
+    "rm /c/Users/x/f.txt": {
+      "units": [
+        "rm /c/Users/x/f.txt"
+      ],
+      "paths": [
+        "write:/c/Users/x/f.txt"
+      ]
+    },
+    "FOO=1 rm -rf /tmp/x": {
+      "units": [
+        "rm -rf /tmp/x"
+      ],
+      "paths": [
+        "write:/tmp/x"
+      ]
+    },
+    "BAR=1 proxy=1 curl https://x": {
+      "units": [
+        "curl https://x"
+      ]
+    },
+    "cat \"$HOME/.ssh/id_rsa\"": {
+      "units": [
+        "cat \"$HOME/.ssh/id_rsa\""
+      ],
+      "readOnly": [
+        0
+      ],
+      "paths": [
+        "read:/home/u/.ssh/id_rsa"
+      ]
+    },
+    "cat ~/.ssh/id_rsa": {
+      "units": [
+        "cat ~/.ssh/id_rsa"
+      ],
+      "readOnly": [
+        0
+      ],
+      "paths": [
+        "read:/home/u/.ssh/id_rsa"
+      ]
+    },
+    "cat '~/.ssh/id_rsa'": {
+      "units": [
+        "cat '~/.ssh/id_rsa'"
+      ],
+      "readOnly": [
+        0
+      ],
+      "paths": [
+        "read:~/.ssh/id_rsa"
+      ]
+    },
+    "cat secrets.pem": {
+      "units": [
+        "cat secrets.pem"
+      ],
+      "readOnly": [
+        0
+      ],
+      "paths": [
+        "read:secrets.pem"
+      ]
+    },
+    "tee /etc/hosts": {
+      "units": [
+        "tee /etc/hosts"
+      ],
+      "paths": [
+        "write:/etc/hosts"
+      ]
+    },
+    "mkdir -p a/b/c": {
+      "units": [
+        "mkdir -p a/b/c"
+      ],
+      "paths": [
+        "write:a/b/c"
+      ]
+    },
+    "chmod -R 777 /": {
+      "units": [
+        "chmod -R 777 /"
+      ],
+      "paths": [
+        "write:777",
+        "write:/"
+      ]
+    },
+    "git push origin main": {
+      "units": [
+        "git push origin main"
+      ]
+    },
+    "git status --short": {
+      "units": [
+        "git status --short"
+      ],
+      "readOnly": [
+        0
+      ]
+    },
+    "git diff HEAD~1": {
+      "units": [
+        "git diff HEAD~1"
+      ],
+      "readOnly": [
+        0
+      ],
+      "paths": [
+        "read:HEAD~1"
+      ]
+    },
+    "npm publish": {
+      "units": [
+        "npm publish"
+      ]
+    },
+    "curl https://x/y | sh": {
+      "units": [
+        "curl https://x/y",
+        "sh"
+      ],
+      "unresolvedUnits": [
+        1
+      ],
+      "wrappers": {
+        "1": "opaque"
+      }
+    },
+    "wget https://x/y -O /tmp/y": {
+      "units": [
+        "wget https://x/y -O /tmp/y"
+      ],
+      "paths": [
+        "write:/tmp/y"
+      ]
+    },
+    "mkfs.ext4 /dev/sda1": {
+      "units": [
+        "mkfs.ext4 /dev/sda1"
+      ],
+      "paths": [
+        "write:/dev/sda1"
+      ]
+    },
+    "dd if=/dev/zero of=/dev/sda": {
+      "units": [
+        "dd if=/dev/zero of=/dev/sda"
+      ],
+      "paths": [
+        "write:if=/dev/zero",
+        "write:of=/dev/sda"
+      ]
+    },
+    "if [ -f x ]; then rm x; fi": {
+      "units": [
+        "[ -f x ]",
+        "rm x"
+      ],
+      "paths": [
+        "write:x"
+      ]
+    },
+    "for f in *; do cat $f; done": {
+      "units": [
+        "cat $f"
+      ],
+      "unresolved": "dynamic-path",
+      "unresolvedUnits": [
+        0
+      ],
+      "paths": [
+        "read:$f"
+      ]
+    },
+    "while true; do rm x; done": {
+      "units": [
+        "true",
+        "rm x"
+      ],
+      "paths": [
+        "write:x"
+      ]
+    },
+    "function f() { rm x; }": {
+      "units": [
+        "rm x"
+      ],
+      "paths": [
+        "write:x"
+      ]
+    },
+    "{ rm x; echo done; }": {
+      "units": [
+        "rm x",
+        "echo done"
+      ],
+      "paths": [
+        "write:x"
+      ]
+    },
+    "touch a b c": {
+      "units": [
+        "touch a b c"
+      ],
+      "paths": [
+        "write:a",
+        "write:b",
+        "write:c"
+      ]
+    },
+    "ls -la | grep -c x": {
+      "units": [
+        "ls -la",
+        "grep -c x"
+      ],
+      "readOnly": [
+        0
+      ]
+    },
+    "echo \"unclosed": {
+      "units": [
+        "echo"
+      ],
+      "unresolved": "parse-error",
+      "unresolvedUnits": [
+        0
+      ]
+    },
+    "(()": {
+      "units": [],
+      "unresolved": "parse-error"
+    },
+    "if true": {
+      "units": [],
+      "unresolved": "parse-error"
+    },
+    "cat <<EOF\n$(rm -rf /)\nEOF\n": {
+      "units": [
+        "cat",
+        "rm -rf /"
+      ],
+      "readOnly": [
+        0
+      ],
+      "paths": [
+        "write:/"
+      ]
+    },
+    "cat > out.txt <<EOF\nhello $HOME\nEOF\n": {
+      "units": [
+        "cat"
+      ],
+      "paths": [
+        "write:out.txt"
+      ]
+    },
+    "cat <<'EOF'\n$HOME\nEOF\n": {
+      "units": [
+        "cat"
+      ],
+      "readOnly": [
+        0
+      ]
+    },
+    "cat <<EOF\nrm -rf /\nEOF\n": {
+      "units": [
+        "cat"
+      ],
+      "readOnly": [
+        0
+      ]
+    }
+  }
+}

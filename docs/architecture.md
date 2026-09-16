@@ -70,6 +70,7 @@ pi-permission-guardian/
 │   │   └── normalize.ts            # 语法糖展开 + baseline 规则合成
 │   ├── facts/
 │   │   ├── types.ts                # Facts / CommandUnit / PathTarget / Direction
+│   │   ├── extract.ts              # 事实层入口：工具路由、解析器降级
 │   │   ├── classify.ts             # 工具名 → surface 映射
 │   │   ├── path-value.ts           # lexical / canonical 双形归一
 │   │   ├── readonly-paths.ts       # read/find/grep/ls/write/edit 路径提取
@@ -114,9 +115,14 @@ pi-permission-guardian/
 ├── config/
 │   └── config.json                 # 参考配置：严格 JSON + $schema（FR-58）
 └── test/
-    ├── unit/                       # 各模块单测
-    ├── fixtures/                   # bash 命令语料 + 期望 facts
-    └── integration/                # 以假 ExtensionAPI 跑完整管线
+    ├── config/                     # 配置加载、合并、规范化、schema 同步
+    ├── facts/                      # 事实层单测与语料驱动测试
+    │   ├── bash-corpus.test.ts      # 语料：单元/路径/方向/wrapper/unresolved
+    │   └── extract-degraded.test.ts # 解析器不可用时的降级
+    ├── audit/                      # 日志落盘、脱敏、轮转
+    ├── extension/                  # 生命周期与命令面（假 ExtensionAPI）
+    └── fixtures/
+        └── bash/                   # 语料 corpus.txt + 期望 corpus.json
 ```
 
 ### 2.1 依赖边界
@@ -293,10 +299,12 @@ gate 决定"哪些工具调用进入规则求值"，**不是**"哪些调用会�
 // src/facts/types.ts
 type Direction = "read" | "write";
 type UnresolvedCause =
-  | "parse-error"          // tree-sitter 报错
-  | "opaque-wrapper"       // bash -c / eval 内部不可见
-  | "indirection-wrapper"  // sudo/xargs 等间接执行
-  | "dynamic-path";        // 非字面量路径
+  | "parse-error"          // tree-sitter 报错（整棵树有 ERROR / missing）
+  | "opaque-wrapper"       // bash -c / eval / source 内部不可见
+  | "indirection-wrapper"  // sudo/xargs/env/find -exec 等间接执行
+  | "dynamic-path"         // 非字面量路径（$DIR、命令替换）
+  | "ambiguous-direction"  // <> 这类读写不可证的重定向
+  | "unparsed-language";   // v1 没有该语言的解析器（PowerShell）
 
 interface PathTarget {
   raw: string;             // 原始字面量
@@ -307,11 +315,12 @@ interface PathTarget {
 }
 
 interface CommandUnit {
-  text: string;            // 用于 bash surface 规则匹配的文本
+  text: string;            // 用于 bash surface 规则匹配的文本（已剥离前导赋值与重定向）
   executable?: string;     // 可执行文件 basename
   paths: PathTarget[];
   viaWrapper?: "opaque" | "indirection";
   unresolved?: UnresolvedCause;
+  readOnly: boolean;       // 命中只读白名单且无可信性/写副作用问题（FR-9）
 }
 
 interface Facts {
@@ -343,6 +352,12 @@ parser.setLanguage(await Language.load(bashWasm));
 - 初始化结果**在失败时不缓存**：一次 WASM 加载抖动不应永久毒化解析器，应允许下一次工具调用重试。
 - 在 `before_agent_start` 预热，让首个命令不承担 WASM 加载延迟。
 - parser 是无状态的（`parse` 是输入的纯函数），可在模块级缓存供同步取用。这要求 `tool_call` handler 中"预热已完成"是常态；未完成时回退到异步解析（一次 `await`）。
+- `session_shutdown` 释放 parser；释放后可再次初始化，支持会话重启。
+- 解析器不可用时不抛异常：退回"整条命令不可静态展开"的保守 facts（命令原文仍参与 bash surface 规则匹配，`readOnly` 强制为 false）。
+
+**已核实的语法边界**（tree-sitter-bash 0.25.1 / ABI 15）：`cat <> f` 这类 `<>` 重定向**语法树直接报错**
+（`file_redirect(<, ERROR(>), word)`），因此 `<>` 在实现上走 `parse-error` 降级而不是独立分支；
+方向分析里的 `ambiguous-direction` 分支保留，用于将来语法支持时的正确归因。
 
 ### 5.2 命令枚举的覆盖与降级
 
@@ -354,11 +369,41 @@ parser.setLanguage(await Language.load(bashWasm));
 | 子 shell `( … )` | 同上 | FR-11 |
 | 前导赋值 `VAR=x cmd` | 剥离赋值前缀后匹配命令 | 否则 `FOO=1 rm -rf /` 会绕过 `rm *` |
 | 重定向 `>`/`>>`/`<` | 产出写/读 PathTarget | FR-13 |
-| `<>`（读写） | 不可证 → 若无法判定方向则整体降级 | 语法上不区分读写，按读写双效处理会低估风险 |
+| `<>`（读写） | 同时产出 read 与 write 目标并标记 `ambiguous-direction`；当前语法对 `<>` 报错，实际走 `parse-error` | 语法上不区分读写，只记一个方向会低估风险 |
 | 包装器内部的命令 | **不逐条 gate**，标记 `viaWrapper` 并降级 | FR-12 |
-| 解析失败的子树 | 标记 `unresolved` 并降级 | FR-14 |
+| 解析失败的子树 | 标记 `unresolved` 并降级；整棵树有 ERROR 时**所有**单元都标记 `parse-error` 且 `readOnly=false` | FR-14：语法没读懂时"命中只读白名单"不能作为放行依据 |
+| 命令文本 | 剥离前导赋值与重定向片段后作为 `text` | 去掉赋值才能匹配 `rm *`；去掉重定向才能让 `rm -rf / > /dev/null` 仍命中 `rm -rf /` |
 
 **降级语义**（`onUnresolvedFacts`，默认 `review`）：不是"放行"，而是"由模型在完整上下文里判断"。配置可选 `ask` 或 `deny`。注意 `opaque-wrapper` 场景下模型也可能无从判断，因此该配置的价值在于给用户一个更严格的选项。
+
+**包装器集合**（`facts/bash/wrappers.ts`，保持最小且可解释——漏一项比多一项危险）：
+
+- `opaque`（值是一段我们看不到的代码）：`bash` `sh` `zsh` `dash` `ksh` `ash` `fish` `csh` `tcsh` `eval` `source` `.`
+- `indirection`（参数由外层程序决定如何执行）：`sudo` `doas` `su` `runuser` `pkexec` `env` `xargs` `nohup` `timeout` `time` `nice` `ionice` `stdbuf` `setsid` `chroot` `command` `builtin` `exec` `parallel`，以及带 `-exec` / `-execdir` / `-ok` / `-okdir` 的 `find`
+
+### 5.3 路径候选与方向归因
+
+`read` / `write` / `edit` 的路径来自工具输入字段；`bash` 的路径来自命令参数与重定向。
+参数里"哪些词算路径"按下表判定，方向在**单条命令内**统一（命令级归因，不是参数级）：
+
+| 条件 | 是否路径候选 | 方向 |
+|---|---|---|
+| 命令命中外置只读白名单（FR-9） | 全部非选项参数，但白名单条目自身消耗的词除外 | read |
+| `cd` / `pushd` / `popd` | 全部非选项参数 | read |
+| 命令属于内置写类文件命令（`rm` `mv` `cp` `tee` `mkdir` `chmod` …） | 全部非选项参数 | write |
+| 参数看起来像路径（含 `/` 或 `\`、以 `~` / `.` 开头、带盘符） | 是 | 命令非只读时 write |
+| 参数是变量/替换且同时像路径（`"$DIR"/x`） | 是，并标记单元 `dynamic-path` | 同上 |
+| URL（`https://…`） | 否 | — |
+| 其余（选项、普通词、不带分隔符的变量） | 否 | — |
+
+取舍说明：
+
+- **为什么给白名单与写类命令的全部参数**：漏掉它们会直接放过 `cat secrets.pem` 这类敏感文件读取。
+- **为什么不给所有命令的全部参数**：`echo note.env` 会因为命中 `*.env` 而被误拦；未知命令只看"看起来像路径"的词。
+- **未知命令按 write 归因**：`grep -rn x src/` 里的 `src/` 会被记为写方向，从而可能命中 `path_write` 规则。方向比实际更严格，是 fail-closed 的有意选择；需要精确归因的用户可以把命令写进 `permission.bash` 规则或扩展 `readOnlyCommands`。
+- **opaque 包装器不提取路径**：`bash -c 'rm -rf /'` 的参数是代码文本；`indirection` 包装器的参数仍是真实参数（`sudo rm -rf /tmp/x`），照常提取。
+- **动态路径保持字面**：不把 cwd 拼上去（拼接会造出一个看起来真实的假路径），单元同时标记 `dynamic-path`，由 `onUnresolvedFacts` 兜底。
+- **路径双形与外部目录**：`lexical` 用目标平台自己的路径实现（`path.posix` / `path.win32`）计算，与被测平台无关；`canonical` 只在目标平台与宿主一致时解析，且对不存在的写目标用"最近存在祖先的真实路径 + 剩余片段"拼出。
 
 ## 6. 规则引擎与配置
 

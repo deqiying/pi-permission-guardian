@@ -244,6 +244,15 @@ agent 读取 `~/.pi/agent/` 下的会话文件，或写入 `../other-project/` �
 
 必须承认护栏不是完备的：shell 别名不展开、`eval` 与 `bash -c` 内的字符串无法静态得知、非字面 `cd` 之后的相对路径无法解析、变量拼接的路径不可知。设计上的应对是**降级而非放行**：任何 `unresolved` 事实一律走 `onUnresolvedFacts`（默认 `review`），由模型在上下文里判断，而不是当作安全。
 
+已核实的解析器边界（实现在 `src/facts/bash/`）：
+
+| 边界 | 影响 |
+|---|---|
+| tree-sitter-bash 0.25.1 对 `<>` 直接报错（`file_redirect(<, ERROR(>), word)`） | `<>` 走 `parse-error` 降级（整条命令按不可信处理），不会出现"只记读方向"的偏宽结果 |
+| v1 没有 PowerShell 解析器 | `powershell` 命令整体标记 `unparsed-language`，因此 PowerShell 规则最多产生 `review` / `ask`，不会单独给出 `allow` / `deny`（fail-closed） |
+| `~user/x`、`${VAR:-default}`、`$((…))` 等取值不在需求可展开范围内 | 保持字面并标记 `dynamic-path`，不猜值 |
+| 大括号展开 `{a,b}` 与 glob 通配符不做展开 | 按字面文本参与匹配；globs 的目录部分仍可靠，可参与外部目录判定 |
+
 ### 8.3 性能预算
 
 评审在关键路径上同步执行，直接决定用户感知的等待时间。必须满足：

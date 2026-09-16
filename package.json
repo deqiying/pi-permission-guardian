@@ -38,6 +38,8 @@
     "validate:config": "node --experimental-strip-types scripts/validate-config.ts"
   },
   "dependencies": {
+    "tree-sitter-bash": "^0.25.1",
+    "web-tree-sitter": "^0.26.13",
     "zod": "^4.6.5"
   },
   "peerDependencies": {

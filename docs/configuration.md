@@ -95,9 +95,9 @@ config 解析失败时 fail-closed：该层的所有 `allow` 抬升为 `review`�
 | `onReviewUnavailable` | `"deny"` | 评审超时 / 模型报错 / 输出无法解析 / `reviewer.model` 未配置（FR-19） |
 | `onUnresolvedFacts` | `"review"` | bash 解析失败、包装器（`bash -c`、`sudo`、`xargs`）内部不可展开、路径非字面量（FR-12/14/15） |
 | `onAskWithoutUI` | `"deny"` | 需要人工确认但没有交互界面：`print` / `json` 模式、无 UI 的子代理会话 |
-
-这三个开关只接受 `"deny"` / `"ask"` / `"review"`，**不接受 `"allow"`**（D7）：它们描述的都是"本次没能得出安全结论"的情形，允许就地配成 `allow` 等于让"拔网线 / 写错模型名 / 解析不了"成为绕过手段。需要整体放宽时用 `yoloMode`，不要用这些开关。配置里写了 `allow` 会被当作非法值处理（该字段被忽略并落回默认值，同时提示配置失效）。
 | `onMixedCommandActions` | `"deny"` | 同一 shell 调用的多个已解析命令单元中，同时存在裁决结果为 `allow` 与 `deny` 的单元 |
+
+这三个失败开关只接受 `"deny"` / `"ask"` / `"review"`，**不接受 `"allow"`**（D7）：它们描述的都是"本次没能得出安全结论"的情形，允许就地配成 `allow` 等于让"拔网线 / 写错模型名 / 解析不了"成为绕过手段。需要整体放宽时用 `yoloMode`，不要用这些开关。配置里写了 `allow` 会被当作非法值处理（该字段被忽略并落回默认值，同时提示配置失效）。
 
 `onReviewUnavailable` 默认 `deny` 的理由：`unavailable` 是基础设施结果，不是安全结论。若放行，等于让"拔网线 / 配错模型名"成为绕过手段。
 

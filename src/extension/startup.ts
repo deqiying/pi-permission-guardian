@@ -5,6 +5,7 @@ import type { AuditLogger } from "../audit/logger.ts";
 import { loadConfig } from "../config/load.ts";
 import type { ResolvedConfig } from "../config/merge.ts";
 import { auditLogDir } from "../config/paths.ts";
+import { disposeBashParser, warmupBashParser } from "../facts/bash/parser.ts";
 import { renderStatusBar } from "./commands.ts";
 import { type GuardianRuntime, resetSessionState } from "./state.ts";
 
@@ -41,6 +42,8 @@ export function createSessionController(
   const warn =
     deps.warn ?? ((message: string): void => console.warn(message));
   let reportedDiagnostics: string | undefined;
+  /** 解析器告警每个会话只报一次，避免每次 before_agent_start 都刷屏。 */
+  let reportedParserError = false;
 
   function refreshConfig(ctx: ExtensionContext): ResolvedConfig {
     const agentDir = deps.getAgentDir();
@@ -132,16 +135,30 @@ export function createSessionController(
       updateStatusBar(ctx);
     },
 
-    beforeAgentStart(ctx: ExtensionContext): void {
+    async beforeAgentStart(ctx: ExtensionContext): Promise<void> {
       // 支持会话内改配置：重新读盘 + 重新合并。
       refreshConfig(ctx);
+      // 预热解析器：让本次会话的第一条 bash 命令不承担 WASM 加载延迟（FR-11）。
+      // 失败不影响裁决——事实层会退回"不可静态展开"的保守路径。
+      const parser = await warmupBashParser();
+      if (parser.lastError !== undefined && !reportedParserError) {
+        reportedParserError = true;
+        const message = `[pi-permission-guardian] bash 解析器不可用（${parser.lastError}）：命令将按不可静态展开处理（FR-14）`;
+        if (ctx.hasUI) {
+          ctx.ui.notify(message, "warning");
+        } else {
+          warn(message);
+        }
+      }
       updateStatusBar(ctx);
     },
 
     async sessionShutdown(ctx: ExtensionContext): Promise<void> {
       await deps.audit.flush();
+      disposeBashParser();
       resetSessionState(runtime);
       runtime.config = undefined;
+      reportedParserError = false;
       reportedDiagnostics = undefined;
       try {
         ctx.ui.setStatus(STATUS_BAR_KEY, undefined);
