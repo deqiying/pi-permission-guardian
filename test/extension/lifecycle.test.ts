@@ -33,7 +33,7 @@ const SESSION_START = { type: "session_start", reason: "startup" } as const;
 
 const REFERENCE_LIKE = JSON.stringify({
   gate: "side-effect",
-  reviewer: { model: "deepseek/deepseek-flash" },
+  reviewer: { model: "deepseek/deepseek-flash", reasoningEffort: "high" },
   permission: { read: "allow", bash: { "rm *": "review" } },
 });
 
@@ -193,8 +193,12 @@ describe("会话生命周期与 /perm 命令面（M1）", () => {
       "全局配置",
       "项目配置",
       "gate：side-effect",
-      "deepseek/deepseek-flash（可用，协议 openai-responses）",
+      "deepseek/deepseek-flash（可用，协议 openai-responses）｜推理强度=high",
       "userBashPolicy",
+      // userBashPolicy 与 classifier 的强度各自独立，未配置时如实回报“不发送”
+      "推理强度=不发送",
+      "预评分 关闭",
+      "失败分支",
       "冲突：无",
       "subagentPolicy",
       "subagentCoverage：未识别，使用父策略",

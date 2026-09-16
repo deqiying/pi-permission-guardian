@@ -580,9 +580,9 @@ surface 匹配：`rule.surface === 对象的 surface` 或 `rule.surface === "*"`
 | `gate` / `extraTools` | 评估范围（architecture §4.0） | `side-effect` 覆盖全部 pi 内置工具；自定义/MCP 工具需 `all` 或 `extraTools` |
 | `onReviewUnavailable` / `onUnresolvedFacts` / `onAskWithoutUI` | 三个失败分支的动作（§9） | 默认分别为 `deny` / `review` / `deny`；可配 `allow` / `deny` / `ask` / `review`（D7：默认 fail-closed，`allow` 是显式例外） |
 | `onMixedCommandActions` | 同一 shell 调用跨命令单元出现 `allow` / `deny` 冲突时的调用级动作 | 默认 `deny`，可选 `ask` / `review` / `deny`；global/default 定义基线，project 只能收紧 |
-| `reviewer` | 评审模型、deadline、证据循环、风险门槛 | `model` 必填；`maxAllowRiskLevel` 实现 FR-23 |
-| `userBashPolicy` | 用户直接执行 `!command` / `!!command` 的开关、自动审核与模型 | 跨层时 `enabled=true` 和 `autoReview=false` 优先；模型可显式覆盖；deny 使用替代 `BashResult` 阻断 |
-| `classifier` | 非阻塞预评分 | `enabled` 默认 `false`（D8） |
+| `reviewer` | 评审模型、推理强度、deadline、证据循环、风险门槛 | `model` 必填；`maxAllowRiskLevel` 实现 FR-23；`reasoningEffort` 默认 `null`（不发送推理参数） |
+| `userBashPolicy` | 用户直接执行 `!command` / `!!command` 的开关、自动审核、模型与推理强度 | 跨层时 `enabled=true` 和 `autoReview=false` 优先；模型与推理强度可显式覆盖；deny 使用替代 `BashResult` 阻断 |
+| `classifier` | 非阻塞预评分 | `enabled` 默认 `false`（D8）；推理强度独立于评审，默认不发送 |
 | `circuitBreaker` | 同轮连续/窗口内拒绝阈值 | 阈值 0 表示关闭该条件 |
 | `cache` / `sessionGrants` | 判定缓存与会话授权记忆 | 仅内存；不缓存 `unavailable` |
 | `subagentPolicy` | 子代理默认动作与会话授权开关 | 跨层时 `enabled=true`、`allowSessionGrants=false` 优先，`defaultAction` 按 `deny > ask > review` 取最严格者；不共享父子状态 |
@@ -667,7 +667,7 @@ for (let round = 0; ; round += 1) {
 
 四个容易被写错的地方：
 
-- **能力面本身就是一个类型**：`ReviewerRegistry` 只声明 `find` / `complete`，所以"不给插件覆盖协议、认证、baseUrl、headers 的入口"（D6）在类型层面就成立，而不是靠约定。测试直接断言传给 `complete` 的选项只有 `signal` 与 `cacheRetention`，且模型对象就是 `find` 的返回值。
+- **能力面本身就是一个类型**：`ReviewerRegistry` 只声明 `find` / `complete`，所以"不给插件覆盖协议、认证、baseUrl、headers 的入口"（D6）在类型层面就成立，而不是靠约定。测试断言模型对象就是 `find` 的返回值，未配置 `reasoningEffort` 时传给 `complete` 的选项只有 `signal` 与 `cacheRetention`；配了强度也只多一个按 `model.api` 选定的推理字段（`review/reasoning.ts`），协议本身仍不可覆盖。
 - **超时与取消用标志位区分**：两者都会走 `controller.abort()`，而 `AbortError` 本身分不清"谁先放弃"。
 - **最后一轮强制无工具**：模型不可能靠“一直查证”拖到 deadline 却不给结论。
 - **证据工具是进程内直接 `execute()`**，不经过 pi 的工具执行路径，因此不会递归触发本插件（FR-28）；对应的测试断言评审前后审计条目数不变。
@@ -679,6 +679,7 @@ for (let round = 0; ; round += 1) {
 - `reviewer.model` 与 `userBashPolicy.model` 只能解析 pi 模型配置文件中的既有模型；网络协议取自解析后的 `Model`，插件不暴露 `api`、`baseUrl`、认证或 headers 覆盖项。
 - `Context = { systemPrompt?, messages, tools? }`（`pi-ai/dist/types.d.ts:389-393`）
 - `options.signal?: AbortSignal`（`pi-ai/dist/types.d.ts:53`）、`temperature`、`maxTokens`、`cacheRetention`
+- **推理强度**：`complete` 的选项就是该 api 自己的请求选项（同文件 `:166-182` 的 `ApiOptionsMap`），只有 `streamSimple` 才做 provider 中立的级别映射（`pi-ai/dist/models.js:551-581` 的 `clampThinkingLevel`）。因此 `reasoningEffort` 由插件按 `model.api` 查表写入：openai 系 → `reasoningEffort`，`bedrock-converse-stream` / `pi-messages` → `reasoning`，`anthropic-messages` → `thinkingEnabled` + `effort`；google / mistral 没有可忠实表达 pi 级别的字段，配了即 `unavailable`（`src/review/reasoning.ts`）。
 - **`ToolChoice = "auto" | "none"`**（`pi-ai/dist/types.d.ts:23`）→ 无法强制模型调用 verdict 工具，这是 FR-22 三段式的根本原因
 - `Tool.constrainedSampling?: false | {type:"json_schema", strict:"prefer"|"require"} | {type:"grammar", ...}`（同文件 :376-388）
 

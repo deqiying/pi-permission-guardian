@@ -123,6 +123,7 @@ export function registerGuardian(
       state: runtime.classifier,
       registry,
       modelSpec: config.classifier.model ?? config.reviewer.model,
+      reasoningEffort: config.classifier.reasoningEffort ?? undefined,
       prompt: {
         toolName: event.toolName,
         toolInput: event.input,

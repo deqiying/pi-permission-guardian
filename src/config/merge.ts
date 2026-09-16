@@ -2,6 +2,7 @@ import {
   type GuardianConfig,
   guardianConfigSchema,
   mostRestrictiveAction,
+  reasoningLevels,
 } from "./schema.ts";
 import {
   buildBaselineRules,
@@ -260,6 +261,18 @@ export function mergeLayers(layers: readonly LoadedLayer[]): ResolvedConfig {
     const userBashModel = pickMostSpecific(contributing, "userBashPolicy", "model");
     if (typeof userBashModel === "string" || userBashModel === null) {
       merged.userBashPolicy.model = userBashModel;
+    }
+    // 推理强度同样取更具体的一层，显式 `null` 表示回到“不发送推理参数”。
+    const userBashReasoning = pickMostSpecific(
+      contributing,
+      "userBashPolicy",
+      "reasoningEffort",
+    );
+    if (userBashReasoning === null) {
+      merged.userBashPolicy.reasoningEffort = null;
+    } else if (typeof userBashReasoning === "string") {
+      merged.userBashPolicy.reasoningEffort =
+        onlyAllowed([userBashReasoning], reasoningLevels)[0] ?? null;
     }
 
     // 子代理：任一层显式启用则启用，默认动作取最严格者，任一层显式禁止即禁止会话授权。

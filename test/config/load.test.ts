@@ -180,12 +180,17 @@ describe("配置加载与合并（FR-47/48/51/52）", () => {
     expect(load(ws, true).onMixedCommandActions).toBe("deny");
   });
 
-  it("userBashPolicy：任一层保持拦截、任一层关闭自动审核即转人工，模型更具体者胜", () => {
+  it("userBashPolicy：任一层保持拦截、任一层关闭自动审核即转人工，模型与推理强度更具体者胜", () => {
     const ws = newWorkspace();
     writeGlobalConfig(
       ws,
       JSON.stringify({
-        userBashPolicy: { enabled: false, autoReview: true, model: "a/one" },
+        userBashPolicy: {
+          enabled: false,
+          autoReview: true,
+          model: "a/one",
+          reasoningEffort: "high",
+        },
       }),
     );
 
@@ -194,27 +199,44 @@ describe("配置加载与合并（FR-47/48/51/52）", () => {
       enabled: false,
       autoReview: true,
       model: "a/one",
+      reasoningEffort: "high",
     });
 
-    // 项目层显式开启 + 关闭自动审核 + 覆盖模型
+    // 项目层显式开启 + 关闭自动审核 + 覆盖模型与推理强度
     writeProjectConfig(
       ws,
       JSON.stringify({
-        userBashPolicy: { enabled: true, autoReview: false, model: "b/two" },
+        userBashPolicy: {
+          enabled: true,
+          autoReview: false,
+          model: "b/two",
+          reasoningEffort: "low",
+        },
       }),
     );
     expect(load(ws, true).userBashPolicy).toEqual({
       enabled: true,
       autoReview: false,
       model: "b/two",
+      reasoningEffort: "low",
     });
 
-    // 项目层只覆盖模型，不改变 enabled / autoReview
+    // 项目层只覆盖模型，不改变 enabled / autoReview，也不改变推理强度
     writeProjectConfig(ws, JSON.stringify({ userBashPolicy: { model: null } }));
     expect(load(ws, true).userBashPolicy).toEqual({
       enabled: false,
       autoReview: true,
       model: null,
+      reasoningEffort: "high",
+    });
+
+    // 项目层写显式 null 才回到“不发送推理参数”
+    writeProjectConfig(ws, JSON.stringify({ userBashPolicy: { reasoningEffort: null } }));
+    expect(load(ws, true).userBashPolicy).toEqual({
+      enabled: false,
+      autoReview: true,
+      model: "a/one",
+      reasoningEffort: null,
     });
   });
 

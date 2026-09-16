@@ -323,6 +323,67 @@ describe("决策管线：评审层（FR-19~FR-28）", () => {
     expect(Object.keys(completeCall[2]).sort()).toEqual(["cacheRetention", "signal"]);
   });
 
+  it("配置了 reviewer.reasoningEffort 时按模型协议下发（FR-19）", async () => {
+    const review = createFakeReview({
+      api: "openai-completions",
+      reasoning: true,
+      responses: [{ toolCalls: [verdictToolCall({ decision: "allow" })] }],
+    });
+    const harness = setup({
+      ...reviewConfig({
+        permission: { write: "review" },
+        reviewer: {
+          model: REVIEW_MODEL,
+          evidenceTools: false,
+          transcript: false,
+          reasoningEffort: "high",
+        },
+      }),
+      review,
+    });
+
+    const ctx = context(harness);
+
+    await harness.engine.decideToolCall(writeEvent("/repo/a.txt"), ctx);
+
+    const completeCall = ctx.modelRegistryCalls.complete[0] as [
+      unknown,
+      unknown,
+      Record<string, unknown>,
+    ];
+    expect(completeCall[2]).toMatchObject({
+      cacheRetention: "none",
+      reasoningEffort: "high",
+    });
+  });
+
+  it("user_bash 的推理强度与 reviewer 各自独立（FR-19）", async () => {
+    const review = createFakeReview({
+      api: "openai-completions",
+      reasoning: true,
+      responses: [{ toolCalls: [verdictToolCall({ decision: "allow" })] }],
+    });
+    // 只给 user_bash 配强度：agent 调用（本用例走的是 tool_call）不受影响。
+    const harness = setup({
+      ...reviewConfig({
+        permission: { write: "review" },
+        userBashPolicy: { reasoningEffort: "high" },
+      }),
+      review,
+    });
+
+    const ctx = context(harness);
+
+    await harness.engine.decideToolCall(writeEvent("/repo/a.txt"), ctx);
+
+    const completeCall = ctx.modelRegistryCalls.complete[0] as [
+      unknown,
+      unknown,
+      Record<string, unknown>,
+    ];
+    expect(Object.keys(completeCall[2]).sort()).toEqual(["cacheRetention", "signal"]);
+  });
+
   it("模型调用名与参数按 provider/model-id 拆分（FR-19）", async () => {
     const review = createFakeReview({
       responses: [{ toolCalls: [verdictToolCall({ decision: "allow" })] }],

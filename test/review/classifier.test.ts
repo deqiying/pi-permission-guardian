@@ -113,6 +113,34 @@ describe("预评分执行（FR-36~38）", () => {
     expect(state.failure?.reason).toContain("classifier.model");
   });
 
+  it("配置了推理强度时按协议写入请求字段（FR-19）", async () => {
+    const state = createClassifierState();
+    const fake = createFakeReview({
+      api: "openai-completions",
+      reasoning: true,
+      responses: [{ text: "low" }],
+    });
+
+    await expect(run(state, fake, { reasoningEffort: "medium" })).resolves.toBe("low");
+
+    expect(fake.calls[0]?.options).toMatchObject({ reasoningEffort: "medium" });
+  });
+
+  it("协议表达不了推理强度时记为 failure，且不发起调用", async () => {
+    const state = createClassifierState();
+    const fake = createFakeReview({
+      api: "google-generative-ai",
+      reasoning: true,
+      responses: [{ text: "low" }],
+    });
+
+    await expect(run(state, fake, { reasoningEffort: "high" })).resolves.toBe("failure");
+
+    expect(state.last).toBeUndefined();
+    expect(state.failure?.reason).toContain("google-generative-ai");
+    expect(fake.calls).toHaveLength(0);
+  });
+
   it("单飞：同时刻至多一个评分请求（FR-38）", async () => {
     const state = createClassifierState();
     let release: (message: AssistantMessage) => void = () => {};

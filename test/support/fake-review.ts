@@ -1,6 +1,13 @@
-import type { AssistantMessage, Context, Model, Api } from "@earendil-works/pi-ai";
+import type {
+  AssistantMessage,
+  Context,
+  Model,
+  Api,
+  ThinkingLevelMap,
+} from "@earendil-works/pi-ai";
 
 import type { ReviewerRegistry } from "../../src/review/reviewer.ts";
+import type { FakeModelEntry } from "./fake-context.ts";
 
 /**
  * 评审层的测试替身（FR-19~FR-28）。
@@ -30,12 +37,13 @@ export type ScriptedStep =
 export interface ReviewCall {
   model: unknown;
   context: Context;
-  options: { signal?: AbortSignal } | undefined;
+  /** 调用选项同时保留可枚举的额外字段，供断言协议字段（如推理强度）。 */
+  options: ({ signal?: AbortSignal } & Record<string, unknown>) | undefined;
 }
 
 export interface FakeReview {
   /** 传给 `createFakeContext({ models })`。 */
-  models: Record<string, { api: string }>;
+  models: Record<string, FakeModelEntry>;
   complete(
     model: unknown,
     context: unknown,
@@ -61,7 +69,16 @@ export function reviewRegistry(fake: FakeReview): ReviewerRegistry {
       if (entry === undefined) {
         return undefined;
       }
-      return { provider, id: modelId, api: entry.api } as unknown as Model<Api>;
+      // 只带显式给出的可选项：断言里 `find` 返回值要与真实 registry 一样“刚好够用”。
+      return {
+        provider,
+        id: modelId,
+        api: entry.api,
+        ...(entry.reasoning === undefined ? {} : { reasoning: entry.reasoning }),
+        ...(entry.thinkingLevelMap === undefined
+          ? {}
+          : { thinkingLevelMap: entry.thinkingLevelMap }),
+      } as unknown as Model<Api>;
     },
     complete(model, context, options) {
       return fake.complete(model, context, options);
@@ -74,15 +91,26 @@ export function createFakeReview(options: {
   api?: string;
   /** 模型引用，格式 `provider/model-id`。 */
   spec?: string;
+  /** 模型是否支持思考；配置了推理强度的用例需要它为 `true`，否则级别会被归一为 `off`。 */
+  reasoning?: boolean;
+  /** 模型自己的级别映射，`clampThinkingLevel` 与 anthropic 的 effort 归一都会读它。 */
+  thinkingLevelMap?: ThinkingLevelMap;
   responses: readonly ScriptedStep[];
 }): FakeReview {
   const api = options.api ?? "openai-responses";
   const spec = options.spec ?? DEFAULT_SPEC;
   const calls: ReviewCall[] = [];
   let index = 0;
+  const model: FakeModelEntry = { api };
+  if (options.reasoning !== undefined) {
+    model.reasoning = options.reasoning;
+  }
+  if (options.thinkingLevelMap !== undefined) {
+    model.thinkingLevelMap = options.thinkingLevelMap;
+  }
 
   return {
-    models: { [spec]: { api } },
+    models: { [spec]: model },
     calls,
     contexts(): Context[] {
       return calls.map((call) => call.context);
@@ -92,7 +120,7 @@ export function createFakeReview(options: {
       context: unknown,
       opts: unknown,
     ): Promise<AssistantMessage> {
-      const options_ = (opts ?? {}) as { signal?: AbortSignal };
+      const options_ = (opts ?? {}) as { signal?: AbortSignal } & Record<string, unknown>;
       calls.push({ model, context: context as Context, options: options_ });
       const step = options.responses[Math.min(index, options.responses.length - 1)];
       index += 1;

@@ -19,6 +19,7 @@
 
   "reviewer": {
     "model": "deepseek/deepseek-flash",
+    "reasoningEffort": null,
     "timeoutMs": 20000,
     "maxEvidenceRounds": 3,
     "evidenceTools": true,
@@ -30,12 +31,14 @@
   "userBashPolicy": {
     "enabled": true,
     "autoReview": true,
-    "model": null
+    "model": null,
+    "reasoningEffort": null
   },
 
   "classifier": {
     "enabled": false,
     "model": null,
+    "reasoningEffort": null,
     "timeoutMs": 15000,
     "maxLag": 2
   },

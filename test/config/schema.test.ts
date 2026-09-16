@@ -161,6 +161,7 @@ describe("配置 schema（FR-57/58）", () => {
       enabled: true,
       autoReview: true,
       model: null,
+      reasoningEffort: null,
     });
     expect(config.subagentPolicy).toEqual({
       enabled: true,
@@ -174,7 +175,22 @@ describe("配置 schema（FR-57/58）", () => {
       transcript: true,
       transcriptBudgetChars: 24000,
       maxAllowRiskLevel: "medium",
+      // 推理强度默认空：不发送任何推理参数，而不是“最小强度”。
+      reasoningEffort: null,
     });
+  });
+
+  it("推理强度只接受 pi 的思考级别，且默认不发送（FR-19）", () => {
+    expect(guardianConfigSchema.parse({}).classifier.reasoningEffort).toBeNull();
+    expect(
+      guardianConfigSchema.parse({ reviewer: { reasoningEffort: "xhigh" } }).reviewer
+        .reasoningEffort,
+    ).toBe("xhigh");
+    for (const key of ["off", "maximal", "HIGH"]) {
+      expect(
+        guardianConfigSchema.safeParse({ reviewer: { reasoningEffort: key } }).success,
+      ).toBe(false);
+    }
   });
 
   it("显式空数组可关闭只读命令白名单", () => {

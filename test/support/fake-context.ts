@@ -3,7 +3,19 @@ import type {
   ExtensionContext,
   SessionEntry,
 } from "@earendil-works/pi-coding-agent";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import type { AssistantMessage, ThinkingLevelMap } from "@earendil-works/pi-ai";
+
+/**
+ * 假 registry 里的模型条目：只给插件真的会读的字段。
+ *
+ * `reasoning` / `thinkingLevelMap` 是推理强度映射的输入（`clampThinkingLevel` 与 anthropic 的
+ * effort 归一都读它们），不配就是“这个模型不支持思考”。
+ */
+export interface FakeModelEntry {
+  api: string;
+  reasoning?: boolean;
+  thinkingLevelMap?: ThinkingLevelMap;
+}
 
 export interface FakeUiCalls {
   notifications: Array<{
@@ -43,7 +55,7 @@ export interface FakeContextOptions {
   confirmResult?: boolean;
   inputResult?: string;
   /** 供 `modelRegistry.find` 命中，键为 `provider/model-id`。 */
-  models?: Record<string, { api: string }>;
+  models?: Record<string, FakeModelEntry>;
   /** 会话条目，供评审 transcript 使用（FR-20）。 */
   entries?: readonly SessionEntry[];
   /** `modelRegistry.complete` 的实现；缺省直接报错，避免测试意外走到真实评审。 */
@@ -148,7 +160,19 @@ export function createFakeContext(
     find(provider: string, modelId: string): { provider: string; id: string; api: string } | undefined {
       modelRegistryCalls.find.push({ provider, modelId });
       const entry = options.models?.[`${provider}/${modelId}`];
-      return entry === undefined ? undefined : { provider, id: modelId, api: entry.api };
+      if (entry === undefined) {
+        return undefined;
+      }
+      // 只带显式给出的可选项：`toEqual` 断言里的模型对象要保持“刚好够用”的形状。
+      return {
+        provider,
+        id: modelId,
+        api: entry.api,
+        ...(entry.reasoning === undefined ? {} : { reasoning: entry.reasoning }),
+        ...(entry.thinkingLevelMap === undefined
+          ? {}
+          : { thinkingLevelMap: entry.thinkingLevelMap }),
+      };
     },
     async complete(model: unknown, context: unknown, opts: unknown): Promise<AssistantMessage> {
       modelRegistryCalls.complete.push([model, context, opts]);

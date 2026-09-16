@@ -118,6 +118,14 @@ const auditLogSchema = z
       "决策审计日志（FR-43/44）。固定按进程本地日期切分，文件名为 guardian-YYYY-MM-DD.jsonl。",
   });
 
+/**
+ * 三处模型调用点共用的推理强度取值，与 pi 的 `ThinkingLevel` 一致（不含 `off`）。
+ *
+ * `null` 是默认值，含义是**不发送任何推理参数**，而不是“用最小强度”：插件没有自己的强度策略，
+ * 不配就完全交给该模型与协议的默认行为。
+ */
+export const reasoningLevels = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
 const reviewerSchema = z
   .strictObject({
     model: z
@@ -129,6 +137,14 @@ const reviewerSchema = z
           '评审模型，格式 "provider/model-id"，只能引用 pi 模型配置文件中已存在的模型。通过 model registry 解析并使用模型配置的接口协议；插件不接受 api/baseUrl/认证/headers 覆盖。未配置或无法解析即 unavailable（FR-19、D6）。',
       })
       .optional(),
+    reasoningEffort: z
+      .enum(reasoningLevels)
+      .nullable()
+      .default(null)
+      .meta({
+        description:
+          "评审调用的推理强度；null 表示不发送推理参数。级别会先按模型 thinkingLevelMap 归一，再交给该模型协议的请求字段；配置了但该协议表达不了（google / mistral）即 unavailable，不静默忽略。",
+      }),
     timeoutMs: z
       .int()
       .min(1000)
@@ -180,6 +196,14 @@ const userBashPolicySchema = z
         description:
           "user_bash 得到 review 动作时是否自动调用评审模型；关闭后转人工确认。",
       }),
+    reasoningEffort: z
+      .enum(reasoningLevels)
+      .nullable()
+      .default(null)
+      .meta({
+        description:
+          "user_bash 自动审核的推理强度；null 表示不发送推理参数（与 reviewer.reasoningEffort 各自独立，不随 model 回落）。",
+      }),
     model: z
       .string()
       .regex(/^[^/]+\/.+$/, '格式必须是 "provider/model-id"')
@@ -203,6 +227,14 @@ const classifierSchema = z
       .nullable()
       .default(null)
       .meta({ description: "缺省复用 reviewer.model" }),
+    reasoningEffort: z
+      .enum(reasoningLevels)
+      .nullable()
+      .default(null)
+      .meta({
+        description:
+          "预评分调用的推理强度；null 表示不发送推理参数。预评分是“先放行、后判定”的便宜路径，默认不继承评审强度（FR-36~38）。",
+      }),
     timeoutMs: z.int().min(1000).default(15000),
     maxLag: z
       .int()

@@ -211,13 +211,18 @@ export function renderStatusReport(
         : `｜额外工具：${config.extraTools.join(", ")}`
     }`,
   );
-  lines.push(`- 评审模型：${describeReviewer(config.reviewer.model, registry)}`);
+  lines.push(
+    `- 评审模型：${describeReviewer(
+      config.reviewer.model,
+      registry,
+    )}｜推理强度=${describeReasoning(config.reviewer.reasoningEffort)}`,
+  );
   lines.push(
     `- userBashPolicy：enabled=${config.userBashPolicy.enabled} autoReview=${
       config.userBashPolicy.autoReview
-    } model=${config.userBashPolicy.model ?? "复用 reviewer.model"}｜冲突：${
-      runtime.userBashConflict ? "检测到其他拦截器声明" : "无"
-    }`,
+    } model=${config.userBashPolicy.model ?? "复用 reviewer.model"} 推理强度=${describeReasoning(
+      config.userBashPolicy.reasoningEffort,
+    )}｜冲突：${runtime.userBashConflict ? "检测到其他拦截器声明" : "无"}`,
   );
   lines.push(
     `- subagentPolicy：enabled=${config.subagentPolicy.enabled} defaultAction=${
@@ -314,7 +319,12 @@ function describeClassifier(config: ResolvedConfig, runtime: GuardianRuntime): s
         : "尚无评分";
   return `预评分 启用 model=${model ?? "（未配置）"} maxLag=${
     config.classifier.maxLag
-  }｜${latest}`;
+  } 推理强度=${describeReasoning(config.classifier.reasoningEffort)}｜${latest}`;
+}
+
+/** 推理强度的状态栏写法：`null` 的语义是“不发送参数”，不是“最小强度”。 */
+function describeReasoning(level: string | null): string {
+  return level ?? "不发送";
 }
 
 /** 一层的规则总条数。 */

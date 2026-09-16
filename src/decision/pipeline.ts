@@ -378,6 +378,20 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
   }
 
   /**
+   * 评审调用的推理强度（FR-19 的边界内，协议字段仍由模型自身决定）。
+   *
+   * `user_bash` 与 agent 调用各自取值，缺省都是“不发送推理参数”：两个入口的等待成本不同，
+   * 不因为共用一个评审模型就共享强度设置（详情见 `review/reasoning.ts`）。
+   */
+  function reviewReasoningEffort(request: DecisionRequest, config: ResolvedConfig) {
+    return (
+      (request.origin === "user_bash"
+        ? config.userBashPolicy.reasoningEffort
+        : config.reviewer.reasoningEffort) ?? undefined
+    );
+  }
+
+  /**
    * 子代理会话的默认动作下限（FR-56）。
    *
    * 只在命中子代理会话、且 `subagentPolicy.enabled` 时生效，取值只能是 `deny` / `ask` / `review`
@@ -692,6 +706,7 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
       ...(transcript === undefined ? {} : { transcript }),
       registry: registryFacade(ctx),
       modelSpec,
+      reasoningEffort: reviewReasoningEffort(request, config),
       timeoutMs: config.reviewer.timeoutMs,
       maxEvidenceRounds: config.reviewer.maxEvidenceRounds,
       evidenceTools: config.reviewer.evidenceTools

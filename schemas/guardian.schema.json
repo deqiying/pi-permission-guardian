@@ -90,6 +90,7 @@
     },
     "reviewer": {
       "default": {
+        "reasoningEffort": null,
         "timeoutMs": 20000,
         "maxEvidenceRounds": 3,
         "evidenceTools": true,
@@ -104,6 +105,26 @@
           "minLength": 3,
           "pattern": "^[^/]+\\/.+$",
           "description": "评审模型，格式 \"provider/model-id\"，只能引用 pi 模型配置文件中已存在的模型。通过 model registry 解析并使用模型配置的接口协议；插件不接受 api/baseUrl/认证/headers 覆盖。未配置或无法解析即 unavailable（FR-19、D6）。"
+        },
+        "reasoningEffort": {
+          "default": null,
+          "description": "评审调用的推理强度；null 表示不发送推理参数。级别会先按模型 thinkingLevelMap 归一，再交给该模型协议的请求字段；配置了但该协议表达不了（google / mistral）即 unavailable，不静默忽略。",
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "timeoutMs": {
           "default": 20000,
@@ -155,6 +176,7 @@
       "default": {
         "enabled": true,
         "autoReview": true,
+        "reasoningEffort": null,
         "model": null
       },
       "type": "object",
@@ -168,6 +190,26 @@
           "default": true,
           "description": "user_bash 得到 review 动作时是否自动调用评审模型；关闭后转人工确认。",
           "type": "boolean"
+        },
+        "reasoningEffort": {
+          "default": null,
+          "description": "user_bash 自动审核的推理强度；null 表示不发送推理参数（与 reviewer.reasoningEffort 各自独立，不随 model 回落）。",
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "model": {
           "default": null,
@@ -190,6 +232,7 @@
       "default": {
         "enabled": false,
         "model": null,
+        "reasoningEffort": null,
         "timeoutMs": 15000,
         "maxLag": 2
       },
@@ -205,6 +248,26 @@
           "type": [
             "string",
             "null"
+          ]
+        },
+        "reasoningEffort": {
+          "default": null,
+          "description": "预评分调用的推理强度；null 表示不发送推理参数。预评分是“先放行、后判定”的便宜路径，默认不继承评审强度（FR-36~38）。",
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ]
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "timeoutMs": {

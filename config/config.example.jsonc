@@ -73,6 +73,14 @@
     //   不会回退到当前会话模型 —— 审查独立性要求"被审查者不能用自己批准自己"（D6）。
     //   请求协议沿用该模型自身的配置，插件不提供 api / baseUrl / 认证 / headers 覆盖项。
     "model": "deepseek/deepseek-flash",
+    // reasoningEffort：评审调用的推理强度，minimal / low / medium / high / xhigh / max；
+    //   null（默认）表示不发送任何推理参数 —— 插件没有自己的强度策略，不配就交给该模型与协议的默认行为
+    //   （例如 DeepSeek 这类在缺省时显式关闭思考的接口，就是不思考）。
+    //   字段名由模型的 api 决定（openai 系 → reasoningEffort；bedrock / pi-messages → reasoning；
+    //   anthropic → thinkingEnabled + effort，minimal 归并为 low）；google / mistral 表达不了这个
+    //   配置，配了即 unavailable（不会静默忽略）。级别会先按模型 thinkingLevelMap 归一。
+    //   它不影响 userBashPolicy 与 classifier：两处各用自己的同名字段。
+    "reasoningEffort": null,
     // timeoutMs：单次评审的硬性 deadline，1000~120000 毫秒。
     "timeoutMs": 20000,
     // maxEvidenceRounds：评审模型调用只读证据工具自行查证的轮次上限，0~8；0 表示关闭证据循环。
@@ -97,7 +105,10 @@
     // autoReview：裁决为 review 时是否自动调用评审模型；关闭则转人工确认（任一层配 false 即转人工）。
     "autoReview": true,
     // model：user_bash 自动审核模型（provider/model-id）；null 表示复用 reviewer.model。
-    "model": null
+    "model": null,
+    // reasoningEffort：user_bash 自动审核的推理强度，取值同 reviewer.reasoningEffort；
+    //   null 表示不发送推理参数（与 reviewer 各自独立，不随 model 回落）。
+    "reasoningEffort": null
   },
 
   // ---------- 降本机制 ----------
@@ -108,6 +119,9 @@
     "enabled": false,
     // model：评分模型；null 表示复用 reviewer.model。
     "model": null,
+    // reasoningEffort：预评分调用的推理强度，取值同 reviewer.reasoningEffort；null 表示不发送推理参数
+    //   （预评分是“先放行、后判定”的便宜路径，默认不继承评审强度）。
+    "reasoningEffort": null,
     // timeoutMs：单次评分超时，最小 1000 毫秒。
     "timeoutMs": 15000,
     // maxLag：评分对应的调用序落后当前序超过此值时快路径失效，0~20（FR-37）。

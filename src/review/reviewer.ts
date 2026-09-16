@@ -5,8 +5,10 @@ import type {
   Message,
   Model,
   ModelsApiStreamOptions,
+  ThinkingLevel,
 } from "@earendil-works/pi-ai";
 
+import { planReasoning, type ReasoningPlan } from "./reasoning.ts";
 import { buildReviewPrompt } from "./prompt.ts";
 import { reviewerSystemPrompt } from "./prompt.ts";
 import {
@@ -67,6 +69,12 @@ export interface ReviewParams {
   registry: ReviewerRegistry;
   /** `provider/model-id`（FR-19）。 */
   modelSpec: string | undefined;
+  /**
+   * 评审调用的推理强度（FR-19 的边界内）；缺省不发送任何推理参数。
+   *
+   * 取值会按模型的 `thinkingLevelMap` 归一后交给该模型协议的请求字段，见 `reasoning.ts`。
+   */
+  reasoningEffort?: ThinkingLevel;
   timeoutMs: number;
   maxEvidenceRounds: number;
   evidenceTools?: readonly EvidenceTool[];
@@ -106,6 +114,7 @@ async function completeBefore(
   model: Model<Api>,
   context: Context,
   deadlineAt: number,
+  reasoning: ReasoningPlan,
 ): Promise<CompletionAttempt> {
   const now = params.now ?? Date.now;
   const remaining = deadlineAt - now();
@@ -135,6 +144,7 @@ async function completeBefore(
     const response = await params.registry.complete(model, context, {
       signal: controller.signal,
       cacheRetention: "none",
+      ...(reasoning.kind === "send" ? reasoning.fragment : {}),
     });
     return { response, timedOut, cancelled };
   } catch (error) {
@@ -235,6 +245,13 @@ export async function requestReview(params: ReviewParams): Promise<ReviewOutcome
     );
   }
   const reviewerModel = boundText(`${model.provider}/${model.id}`, 200);
+  const reasoning = planReasoning(model, params.reasoningEffort);
+  if (reasoning.kind === "unsupported") {
+    return failure(
+      "not-configured",
+      `reviewer.reasoningEffort 无法映射到模型 api "${boundText(reasoning.api, 60)}"：该协议没有可用的推理强度字段。请改用支持该配置的模型，或去掉这一项。`,
+    );
+  }
 
   const now = params.now ?? Date.now;
   const evidenceTools = params.evidenceTools ?? [];
@@ -278,7 +295,7 @@ export async function requestReview(params: ReviewParams): Promise<ReviewOutcome
       ...(forceAnswer ? {} : { tools: providerTools }),
     };
 
-    const attempt = await completeBefore(params, model, context, deadlineAt);
+    const attempt = await completeBefore(params, model, context, deadlineAt, reasoning);
     if (attempt.cancelled) {
       return failure("cancelled", "评审在完成前被取消。");
     }

@@ -84,6 +84,86 @@ describe("模型解析（FR-19）", () => {
   });
 });
 
+describe("推理强度（FR-19）", () => {
+  /** 一次成功的评审，只关心它带到 registry 的选项。 */
+  function allowReview(
+    overrides: Partial<Parameters<typeof createFakeReview>[0]>,
+  ): ReturnType<typeof createFakeReview> {
+    return createFakeReview({
+      responses: [{ toolCalls: [verdictToolCall({ decision: "allow" })] }],
+      ...overrides,
+    });
+  }
+
+  function optionKeys(call: { options?: Record<string, unknown> } | undefined): string[] {
+    return Object.keys(call?.options ?? {}).sort();
+  }
+
+  it("未配置时不发送任何推理参数", async () => {
+    const review = allowReview({ api: "openai-completions", reasoning: true });
+
+    await requestReview(params(review));
+
+    expect(optionKeys(review.calls[0])).toEqual(["cacheRetention", "signal"]);
+  });
+
+  it("openai 协议把级别放进 reasoningEffort", async () => {
+    const review = allowReview({ api: "openai-completions", reasoning: true });
+
+    await requestReview(params(review, { reasoningEffort: "high" }));
+
+    expect(review.calls[0]?.options).toMatchObject({ reasoningEffort: "high" });
+  });
+
+  it("bedrock / pi-messages 用协议原生的 reasoning", async () => {
+    const review = allowReview({ api: "pi-messages", reasoning: true });
+
+    await requestReview(params(review, { reasoningEffort: "medium" }));
+
+    expect(review.calls[0]?.options).toMatchObject({ reasoning: "medium" });
+  });
+
+  it("anthropic 需要显式打开思考，minimal 归并为 low", async () => {
+    const review = allowReview({ api: "anthropic-messages", reasoning: true });
+
+    await requestReview(params(review, { reasoningEffort: "minimal" }));
+
+    expect(review.calls[0]?.options).toMatchObject({ thinkingEnabled: true, effort: "low" });
+  });
+
+  it("级别先按模型 thinkingLevelMap 归一（medium 不支持时上调到 high）", async () => {
+    const review = allowReview({
+      api: "openai-completions",
+      reasoning: true,
+      thinkingLevelMap: { minimal: null, low: "low", medium: null, high: "high", max: "max" },
+    });
+
+    await requestReview(params(review, { reasoningEffort: "medium" }));
+
+    expect(review.calls[0]?.options).toMatchObject({ reasoningEffort: "high" });
+  });
+
+  it("模型不支持思考时不发送任何推理参数", async () => {
+    const review = allowReview({ api: "openai-completions", reasoning: false });
+
+    await requestReview(params(review, { reasoningEffort: "high" }));
+
+    expect(optionKeys(review.calls[0])).toEqual(["cacheRetention", "signal"]);
+  });
+
+  it("协议表达不了这个配置时判为 not-configured，不静默忽略", async () => {
+    const review = allowReview({ api: "google-generative-ai", reasoning: true });
+
+    const outcome = await requestReview(params(review, { reasoningEffort: "high" }));
+
+    expect(outcome).toMatchObject({ kind: "unavailable", cause: "not-configured" });
+    expect(outcome.kind === "unavailable" ? outcome.reason : "").toContain(
+      "google-generative-ai",
+    );
+    expect(review.calls).toHaveLength(0);
+  });
+});
+
 describe("verdict 三段式（FR-22）", () => {
   it("第一段：模型调用 verdict 工具即结论", async () => {
     const review = createFakeReview({

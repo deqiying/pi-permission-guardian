@@ -1,5 +1,6 @@
-import type { AssistantMessage, Context } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Context, ThinkingLevel } from "@earendil-works/pi-ai";
 
+import { planReasoning } from "./reasoning.ts";
 import { parseModelSpec, type ReviewerRegistry } from "./reviewer.ts";
 import { MAX_INPUT_CHARS, boundText } from "./types.ts";
 
@@ -91,6 +92,8 @@ export interface ClassifierRunParams {
   /** 打分对应的调用序（`GuardianRuntime.callIndex`）。 */
   callIndex: number;
   authorizationVersion: string;
+  /** 预评分调用的推理强度；缺省不发送任何推理参数（见 `reasoning.ts`）。 */
+  reasoningEffort?: ThinkingLevel;
   timeoutMs: number;
   signal?: AbortSignal;
 }
@@ -130,6 +133,13 @@ export async function runClassifier(params: ClassifierRunParams): Promise<Classi
     if (model === undefined) {
       return fail(state, `classifier.model "${boundText(spec, 80)}" 在 pi 模型配置里找不到。`);
     }
+    const reasoning = planReasoning(model, params.reasoningEffort);
+    if (reasoning.kind === "unsupported") {
+      return fail(
+        state,
+        `classifier.reasoningEffort 无法映射到模型 api "${boundText(reasoning.api, 60)}"：该协议没有可用的推理强度字段。`,
+      );
+    }
 
     const remaining = Math.max(1, params.timeoutMs);
     const controller = new AbortController();
@@ -155,6 +165,7 @@ export async function runClassifier(params: ClassifierRunParams): Promise<Classi
       response = await params.registry.complete(model, scoreContext(params.prompt), {
         signal: controller.signal,
         cacheRetention: "none",
+        ...(reasoning.kind === "send" ? reasoning.fragment : {}),
       });
     } catch (error) {
       if (timedOut) {

@@ -161,6 +161,7 @@ echo ok && rm -rf /
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `model` | 无 | **使用评审即必填**。格式 `provider/model-id`，只能引用 pi 模型配置文件中已存在的模型 |
+| `reasoningEffort` | `null` | 评审调用的推理强度，见 §5.1.1。`null` 表示不发送任何推理参数 |
 | `timeoutMs` | `20000` | 单次评审的硬性 deadline（FR-25） |
 | `maxEvidenceRounds` | `3` | 评审模型调用只读证据工具的轮次上限，`0` 关闭证据循环（FR-24） |
 | `evidenceTools` | `true` | 是否允许评审模型用 `read`/`grep`/`find`/`ls` 自行查证 |
@@ -173,6 +174,23 @@ echo ok && rm -rf /
 评审模型必须显式配置，未配置时判为 `unavailable` 而不是拿当前会话模型顶上（D6）。理由是**审查独立性**：让被审查者用自己的模型批准自己，等于把授权与执行合并到同一主体，护栏在语义上就不成立了。
 
 模型必须通过 `ctx.modelRegistry.find` 解析，再用 `ctx.modelRegistry.complete` 调用。请求协议沿用模型自身配置的 `api`，插件不提供 `api`、`baseUrl`、认证或 headers 覆盖项，因此实际请求协议不会与 pi 模型配置漂移。
+
+### 5.1.1 推理强度（`reasoningEffort`）
+
+`reasoningEffort` 是插件唯一会自己写入的请求字段，取值与 pi 的思考级别一致：`minimal` / `low` / `medium` / `high` / `xhigh` / `max`。**默认 `null` 表示不发送任何推理参数**——插件没有自己的强度策略，不配就完全交给该模型与协议的默认行为（对 DeepSeek 这类在缺省时显式关闭思考的接口，也就是不思考）。
+
+字段名由模型的 `api` 决定，插件不选择协议：
+
+| `model.api` | 实际写入的请求字段 |
+|---|---|
+| `openai-completions` / `openai-responses` / `azure-openai-responses` / `openai-codex-responses` | `reasoningEffort` |
+| `bedrock-converse-stream` / `pi-messages` | `reasoning` |
+| `anthropic-messages` | `thinkingEnabled: true` + `effort`（`minimal` 归并为 `low`） |
+| `google-generative-ai` / `google-vertex` / `mistral-conversations` | 不支持，配了即 `unavailable` |
+
+级别会先按模型的 `thinkingLevelMap` 归一（与 pi 主会话同一套 clamp 规则），归一为 `off`（例如模型 `reasoning: false`）时不发送任何参数。若配置了强度而该协议表达不了它，评审判为 `unavailable`（`not-configured`）而不是静默忽略：把“要求的审慎程度”和实际发出的请求说成两回事，等于让一次弱评审冒充独立判断。
+
+`reviewer.reasoningEffort` **不影响** `user_bash` 与预评分：两处各用自己的同名字段，见 §5.3 与 §6.1。
 
 ### 5.2 风险门槛
 
@@ -199,10 +217,11 @@ echo ok && rm -rf /
 | `userBashPolicy.enabled` | `true` | 是否让用户直接执行的命令经过本插件 |
 | `userBashPolicy.autoReview` | `true` | `review` 动作是否自动调用评审模型；关闭时转人工确认 |
 | `userBashPolicy.model` | `null` | 自动审核模型；只能引用 pi 模型配置中的模型，`null` 表示复用 `reviewer.model` |
+| `userBashPolicy.reasoningEffort` | `null` | 自动审核的推理强度，取值同 §5.1.1；`null` 表示不发送推理参数（不随 `model` 回落） |
 
 `user_bash` 与 `tool_call` 复用同一 facts、规则、授权、评审和审计管线，仅最终执行适配不同：`allow` 返回正常 shell 执行；`deny` 返回替代 `BashResult`（`{output: "<理由>\n", exitCode: 1, cancelled: false, truncated: false}`）并让真实命令不启动；`review` 按本节自动审核。`!!` 与 `!` 的安全裁决与替代结果完全相同（`excludeFromContext` 由 pi 在记录结果时处理，不由插件改写）。用户直接输入命令本身不创建会话授权；只有人工确认对话框中的“本会话允许此类”才能创建。
 
-跨全局/项目层合并时采用保守方向：任一层 `enabled=true` 时保持拦截；任一层 `autoReview=false` 时转人工确认；`model` 可由更具体的配置覆盖。
+跨全局/项目层合并时采用保守方向：任一层 `enabled=true` 时保持拦截；任一层 `autoReview=false` 时转人工确认；`model` 与 `reasoningEffort` 可由更具体的配置覆盖（显式 `null` 也按“更具体”生效）。
 
 共存冲突只检测和提示，不强制。插件通过 `pi.events` 声明自己的 `user_bash` claim；检测到另一声明时在 UI/日志中提示，并在 `/perm status` 标记冲突。不会改变扩展加载顺序，也不会为了抢回事件而重复拦截。pi 当前不暴露扩展枚举，因此对“未声明且排在前面的拦截器”只能记录为不可观测边界。
 
@@ -214,6 +233,7 @@ echo ok && rm -rf /
 |---|---|---|
 | `classifier.enabled` | `false` | 见下方警告 |
 | `classifier.model` | `null` | 缺省复用 `reviewer.model` |
+| `classifier.reasoningEffort` | `null` | 预评分调用的推理强度，取值同 §5.1.1；`null` 表示不发送推理参数（预评分是便宜路径，不继承评审强度） |
 | `classifier.timeoutMs` | `15000` | |
 | `classifier.maxLag` | `2` | 评分对应的调用序落后当前超过此值时，快路径失效（FR-37） |
 

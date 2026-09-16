@@ -121,7 +121,7 @@ agent 读取 `~/.pi/agent/` 下的会话文件，或写入 `../other-project/` �
 
 | 编号 | 需求 | 验收标准 |
 |---|---|---|
-| FR-19 | 评审模型由配置 `reviewer.model` 指定（`provider/model-id` 格式），只能来自 pi 模型配置文件并经 `ctx.modelRegistry.find` / `complete` 使用；接口协议必须采用解析后 `Model` 自带的配置协议，插件不得自行选择 wire API 或覆盖 `baseUrl`、认证和 headers | 未配置或无法解析时行为为 `unavailable`；测试确认 `openai-responses` 等协议来自模型配置而非插件硬编码 |
+| FR-19 | 评审模型由配置 `reviewer.model` 指定（`provider/model-id` 格式），只能来自 pi 模型配置文件并经 `ctx.modelRegistry.find` / `complete` 使用；接口协议必须采用解析后 `Model` 自带的配置协议，插件不得自行选择 wire API 或覆盖 `baseUrl`、认证和 headers；可选的 `reasoningEffort`（默认空）只表达“要多少思考”，字段名由模型协议决定，协议表达不了时评审判 `unavailable` 而不是静默忽略 | 未配置或无法解析时行为为 `unavailable`；测试确认 `openai-responses` 等协议来自模型配置而非插件硬编码；推理强度映射与“默认不发送”各有用例 |
 | FR-20 | 评审输入包含：待执行动作原文（置于消息末尾）、工作目录、命中的规则与为何需复查、facts 摘要、受预算约束的会话 transcript、本会话已授予的授权键摘要 | prompt 结构有断言：区块顺序、待审查内容的末尾位置、预算截断、缺失会话时的明示 |
 | FR-21 | 评审输出为结构化 verdict：`decision`（`allow` / `deny`）、`riskLevel`（`low`/`medium`/`high`/`critical`）、`userAuthorization`（`unknown`/`low`/`medium`/`high`）、`reversible`（bool）、`rationale`（≤300 字）；`decision` 是唯一硬性字段，其余缺失时按保守方向回填：`riskLevel` → `high`（于是经 FR-23 门槛转人工）、`userAuthorization` → `unknown`、`reversible` → 跟随结论 | 解析器对各种畸形输出有测试；缺字段回填有专项用例 |
 | FR-22 | verdict 获取采用三段式降级：① 优先使用结构化输出能力（`Tool.constrainedSampling` 的 `json_schema`，`strict: "prefer"`）；② 退化为提示约束 + JSON 文本解析（容忍代码围栏、整段 JSON 与前后缀包裹的平衡 `{…}` 对象）；③ 仍失败即 `unavailable`，**绝不猜成 allow** | 三段各自有用例 |
