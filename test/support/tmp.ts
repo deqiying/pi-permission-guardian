@@ -25,8 +25,17 @@ export function createWorkspace(): TempWorkspace {
     agentDir,
     cwd,
     cleanup(): void {
-      rmSync(agentDir, { recursive: true, force: true });
-      rmSync(cwd, { recursive: true, force: true });
+      // 审计日志是异步落盘（`AuditLogger.record` 只入队，`flush` 由 `session_shutdown` 触发）：
+      // 用例不跑关闭流程时，删除动作会和 `appendFile` 抢同一个目录，Windows 上偶发
+      // ENOTEMPTY/EBUSY。maxRetries 是 Node 文档给出的重试方式，只加固测试收尾。
+      const options = {
+        recursive: true,
+        force: true,
+        maxRetries: 5,
+        retryDelay: 25,
+      } as const;
+      rmSync(agentDir, options);
+      rmSync(cwd, options);
     },
   };
 }
