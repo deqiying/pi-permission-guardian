@@ -8,6 +8,15 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { STATUS_BAR_KEY } from "../../src/audit/entry.ts";
 import { GUARDIAN_COMMAND, GUARDIAN_FLAG, registerGuardian } from "../../src/extension/register.ts";
+import {
+  resetSubagentStore,
+  SUBAGENT_BOUND,
+  SUBAGENT_DISPOSED,
+  SUBAGENT_SESSION_CREATED,
+  SUBAGENT_WARNING_ENTRY_TYPE,
+  subagentStoreSnapshot,
+  UNGUARDED_REASON,
+} from "../../src/extension/subagents.ts";
 import { USER_BASH_CLAIM_CHANNEL } from "../../src/extension/user-bash.ts";
 import type { GuardianRuntime } from "../../src/extension/state.ts";
 import { createFakeCommandContext, type FakeContextOptions } from "../support/fake-context.ts";
@@ -42,6 +51,8 @@ let workspace: TempWorkspace | undefined;
 afterEach(() => {
   workspace?.cleanup();
   workspace = undefined;
+  // 子代理 registry 是进程级存储，用例之间必须清空，否则 sessionId 复用会造成假命中。
+  resetSubagentStore();
 });
 
 function setup(): Harness {
@@ -64,9 +75,12 @@ function context(
     hasUI?: boolean;
     complete?: FakeContextOptions["complete"];
     entries?: FakeContextOptions["entries"];
+    /** 会话 ID；子代理用例用它模拟"本实例运行在子会话里"。 */
+    sessionId?: string;
   } = {},
 ) {
   return createFakeCommandContext({
+    ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
     cwd: harness.workspace.cwd,
     projectTrusted: options.projectTrusted ?? false,
     models: options.models,
@@ -586,5 +600,97 @@ describe("user_bash 端到端（M4，FR-60）", () => {
 
     expect(harness.runtime.userBashConflict).toBe(false);
     expect(harness.warnings).toEqual([]);
+  });
+});
+
+describe("M6 子代理会话接线（FR-54~FR-56）", () => {
+  const CHILD_ID = "child-session-1";
+
+  /** 模拟父实例收到子代理生命周期的 `session-created` 公告。 */
+  function announceChild(harness: Harness, parentSessionId: string | undefined): void {
+    harness.pi.emitOnBus(SUBAGENT_SESSION_CREATED, {
+      sessionId: CHILD_ID,
+      ...(parentSessionId === undefined ? {} : { parentSessionId }),
+    });
+  }
+
+  it("父会话在子会话未加载护栏时给出四处一致证据（UI/条目/状态）", async () => {
+    const harness = setup();
+    writeGlobalConfig(harness.workspace, REFERENCE_LIKE);
+    const ctx = await startSession(harness);
+    expect(statusBar(ctx)).toBe("perm: on");
+
+    announceChild(harness, "parent-1");
+    harness.pi.emitOnBus(SUBAGENT_BOUND, {
+      sessionId: CHILD_ID,
+      parentSessionId: "parent-1",
+    });
+
+    // 1) 可见告警；2) 会话记录；3) runtime 标记；4) /perm status 反映。
+    const warnings = ctx.uiCalls.notifications.filter((entry) => entry.type === "warning");
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.message).toContain(CHILD_ID);
+    expect(harness.pi.entries.at(-1)?.customType).toBe(SUBAGENT_WARNING_ENTRY_TYPE);
+    expect(harness.pi.entries.at(-1)?.data).toMatchObject({
+      sessionId: CHILD_ID,
+      reason: UNGUARDED_REASON,
+    });
+    expect(harness.runtime.subagentCoverage).toBe("unguarded");
+
+    await harness.pi.invokeCommand(GUARDIAN_COMMAND, "status", asCommandContext(ctx));
+    expect(lastNotification(ctx)).toContain("unguarded");
+    expect(lastNotification(ctx)).toContain(CHILD_ID);
+
+    harness.pi.emitOnBus(SUBAGENT_DISPOSED, { sessionId: CHILD_ID });
+  });
+
+  it("子会话识别后启用 subagentPolicy 并在状态栏标出", async () => {
+    const harness = setup();
+    writeGlobalConfig(
+      harness.workspace,
+      JSON.stringify({ subagentPolicy: { defaultAction: "deny" } }),
+    );
+    // 子实例：自己的 sessionId 已在 registry 中，session_start 时写下绑定握手。
+    announceChild(harness, "parent-1");
+    const ctx = await startSession(harness, { sessionId: CHILD_ID });
+
+    expect(harness.runtime.isSubagentSession).toBe(true);
+    expect(harness.runtime.subagentParentSessionId).toBe("parent-1");
+    expect(statusBar(ctx)).toBe("perm: on [子代理]");
+    // 子实例的握手让父实例的 bound 校对通过（这里以存储状态断言同一事实）。
+    expect(subagentStoreSnapshot().handshakes).toEqual([CHILD_ID]);
+
+    await harness.pi.invokeCommand(GUARDIAN_COMMAND, "status", asCommandContext(ctx));
+    expect(lastNotification(ctx)).toContain("已识别（父会话 parent-1）");
+    expect(lastNotification(ctx)).toContain("启用 subagentPolicy");
+
+    harness.pi.emitOnBus(SUBAGENT_DISPOSED, { sessionId: CHILD_ID });
+  });
+
+  it("subagentPolicy.enabled=false 时识别为子会话但仍用父策略", async () => {
+    const harness = setup();
+    writeGlobalConfig(
+      harness.workspace,
+      JSON.stringify({ subagentPolicy: { enabled: false } }),
+    );
+    announceChild(harness, "parent-1");
+    const ctx = await startSession(harness, { sessionId: CHILD_ID });
+
+    expect(harness.runtime.isSubagentSession).toBe(true);
+    await harness.pi.invokeCommand(GUARDIAN_COMMAND, "status", asCommandContext(ctx));
+    expect(lastNotification(ctx)).toContain("已识别（父会话 parent-1）");
+    expect(lastNotification(ctx)).toContain("使用父策略");
+
+    harness.pi.emitOnBus(SUBAGENT_DISPOSED, { sessionId: CHILD_ID });
+  });
+
+  it("非子代理会话仍然显示「未识别，使用父策略」", async () => {
+    const harness = setup();
+    writeGlobalConfig(harness.workspace, REFERENCE_LIKE);
+    const ctx = await startSession(harness);
+
+    await harness.pi.invokeCommand(GUARDIAN_COMMAND, "status", asCommandContext(ctx));
+
+    expect(lastNotification(ctx)).toContain("subagentCoverage：未识别，使用父策略");
   });
 });

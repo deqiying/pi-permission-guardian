@@ -24,6 +24,9 @@ export interface LastDecision {
   toolName: string;
 }
 
+/** 父会话看到的子代理护栏覆盖情况（FR-55）。`unguarded` 表示发现过未加载护栏的子会话。 */
+export type SubagentCoverage = "none" | "unguarded";
+
 export interface GuardianRuntime {
   /** 总开关的实际结果：`engagedOverride ?? (config.enabled || --perm)`。 */
   engaged: boolean;
@@ -54,8 +57,14 @@ export interface GuardianRuntime {
   classifier: ClassifierState;
   /** 最近一次决策结果，供状态栏显示来源（FR-41）。 */
   lastDecision: LastDecision | undefined;
-  /** 当前会话是否是已识别的子代理会话（M6 写入）。 */
+  /** 当前会话是否是已识别的子代理会话（M6 写入，FR-56）。 */
   isSubagentSession: boolean;
+  /** 识别为子代理会话时的父会话 ID；仅用于观测。 */
+  subagentParentSessionId: string | undefined;
+  /** 父会话视图：是否发现过未加载护栏的子会话（FR-55）。 */
+  subagentCoverage: SubagentCoverage;
+  /** 未加载护栏的子会话 ID，供 `/perm status` 列出。 */
+  unguardedChildren: Set<string>;
   /** 检测到其他 `user_bash` 拦截器声明（M4 写入）。 */
   userBashConflict: boolean;
 }
@@ -77,6 +86,9 @@ export function createRuntime(): GuardianRuntime {
     classifier: createClassifierState(),
     lastDecision: undefined,
     isSubagentSession: false,
+    subagentParentSessionId: undefined,
+    subagentCoverage: "none",
+    unguardedChildren: new Set<string>(),
     userBashConflict: false,
   };
 }
@@ -93,6 +105,9 @@ export function resetSessionState(runtime: GuardianRuntime): void {
   runtime.classifier = createClassifierState();
   runtime.lastDecision = undefined;
   runtime.isSubagentSession = false;
+  runtime.subagentParentSessionId = undefined;
+  runtime.subagentCoverage = "none";
+  runtime.unguardedChildren.clear();
   runtime.userBashConflict = false;
 }
 

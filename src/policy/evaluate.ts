@@ -174,6 +174,8 @@ export interface ObjectEvaluation {
 
 const READ_ONLY_REASON = "命中只读命令白名单（FR-9）";
 const UNRESOLVED_REASON = "该对象无法静态确定执行内容（FR-14）";
+/** 子代理会话把默认动作矩阵收紧时的理由（FR-56）。 */
+export const SUBAGENT_FLOOR_REASON = "子代理会话按 subagentPolicy.defaultAction 收紧默认动作";
 
 /** 层内 last-match-wins：按 (layer, surface) 分组，各取 index 最大的一条。 */
 function lastMatchPerGroup(rules: readonly CompiledRule[]): CompiledRule[] {
@@ -230,13 +232,20 @@ function ruleResult(
  *    （`onUnresolvedFacts`）。它**取代**默认矩阵，而不是取代整个调用的结果：PowerShell 的每个
  *    单元都是 `unresolved`，若让调用级分支覆盖已求值结果，显式的 `permission.powershell = "ask"`
  *    会被 `onUnresolvedFacts` 的默认 `review` 悄悄放宽。
- * 4. 否则才轮到 baseline 兜底（§6.1：baseline 是兜底层，不是普通一层）。
+ * 4. 否则才轮到 baseline 兜底（§6.1：baseline 是兜底层，不是普通一层）。子代理会话在
+ *    `subagentPolicy.enabled` 时把这一层的默认动作再抬到 `subagentPolicy.defaultAction`
+ *    （FR-56）：取两者中最严格者，因此只可能收紧，不会把 baseline 的 `review` 放宽成 `ask`。
+ *    它只作用于这一层：用户规则（第 1 步）、只读白名单（第 2 步）与 `onUnresolvedFacts`
+ *    （第 3 步）不受影响 —— 那三者分别代表用户的显式决定、已核实无副作用的命令集、
+ *    以及“无法静态确定”的失败分支，都不是“默认动作”。
  * 5. 都没有 → 不表态。
  */
 export function evaluateObject(
   object: PolicyObject,
   table: CompiledRuleTable,
   unresolvedAction: Action,
+  /** 子代理会话的默认动作下限（FR-56）；`undefined` 表示不适用。 */
+  defaultActionFloor?: Action,
 ): ObjectEvaluation {
   const candidateSurfaces = new Set([...object.surfaces, "*"]);
   const matched = table.rules.filter(
@@ -265,7 +274,19 @@ export function evaluateObject(
 
   const baselineMatched = matched.filter((rule) => rule.layer === "baseline");
   if (baselineMatched.length > 0) {
-    return ruleResult(object, "baseline", strictestRule(lastMatchPerGroup(baselineMatched)));
+    const chosen = strictestRule(lastMatchPerGroup(baselineMatched));
+    if (defaultActionFloor === undefined) {
+      return ruleResult(object, "baseline", chosen);
+    }
+    const action = strictestAction([chosen.action, defaultActionFloor]) ?? chosen.action;
+    if (action === chosen.action) {
+      return ruleResult(object, "baseline", chosen);
+    }
+    return {
+      ...ruleResult(object, "baseline", chosen),
+      action,
+      reason: `${SUBAGENT_FLOOR_REASON}：${chosen.surface} ${chosen.action} → ${action}`,
+    };
   }
 
   return { object };
@@ -288,6 +309,8 @@ export interface EvaluateCallInput {
   toolName: string;
   config: ResolvedConfig;
   table: CompiledRuleTable;
+  /** 子代理会话的默认动作下限（FR-56）；只在默认动作矩阵那一层生效。 */
+  defaultActionFloor?: Action;
 }
 
 /** 命中对象动作的最严格者（同严格度时取先出现的，保证结果确定）。 */
@@ -320,7 +343,12 @@ function strictestEvaluation(
  */
 export function evaluateCall(input: EvaluateCallInput): CallEvaluation {
   const evaluations = buildPolicyObjects(input.facts, input.toolName).map((object) =>
-    evaluateObject(object, input.table, input.config.onUnresolvedFacts),
+    evaluateObject(
+      object,
+      input.table,
+      input.config.onUnresolvedFacts,
+      input.defaultActionFloor,
+    ),
   );
   const actions = evaluations
     .map((evaluation) => evaluation.action)

@@ -111,6 +111,9 @@ export function renderStatusBar(runtime: GuardianRuntime): string | undefined {
   if (runtime.yolo) {
     flags.push("YOLO");
   }
+  if (runtime.isSubagentSession) {
+    flags.push("子代理");
+  }
   if (runtime.config.degraded) {
     flags.push("配置失效");
   }
@@ -276,12 +279,21 @@ function resolveModel(
 }
 
 function describeSubagentCoverage(deps: CommandDeps): string {
-  if (!deps.runtime.isSubagentSession) {
-    return "未识别，使用父策略";
+  const { runtime } = deps;
+  if (runtime.isSubagentSession) {
+    const parent =
+      runtime.subagentParentSessionId === undefined
+        ? ""
+        : `（父会话 ${runtime.subagentParentSessionId}）`;
+    return runtime.config?.subagentPolicy.enabled === true
+      ? `已识别${parent}，启用 subagentPolicy`
+      : `已识别${parent}，但 subagentPolicy 已关闭，使用父策略`;
   }
-  return deps.runtime.config?.subagentPolicy.enabled === true
-    ? "已识别，启用 subagentPolicy"
-    : "已识别，但 subagentPolicy 已关闭，使用父策略";
+  if (runtime.subagentCoverage === "unguarded") {
+    const children = [...runtime.unguardedChildren].join("、");
+    return `unguarded：子会话 ${children} 未加载护栏（检查 excludedExtensionPackages 或加载失败）`;
+  }
+  return "未识别，使用父策略";
 }
 
 /**

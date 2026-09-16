@@ -16,6 +16,7 @@ import { extractFacts } from "../facts/extract.ts";
 import type { Facts, FactsContext } from "../facts/types.ts";
 import type { GuardianRuntime } from "../extension/state.ts";
 import { askHuman } from "../interact/dialog.ts";
+import type { Action } from "../policy/action.ts";
 import {
   evaluateCall,
   type CallEvaluation,
@@ -331,7 +332,14 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
     let call: CallEvaluation;
     try {
       facts = await extractFacts(toolName, request.input, factsContext);
-      call = evaluateCall({ facts, toolName, config, table: ruleTable(config) });
+      const floor = defaultActionFloor(config);
+      call = evaluateCall({
+        facts,
+        toolName,
+        config,
+        table: ruleTable(config),
+        ...(floor === undefined ? {} : { defaultActionFloor: floor }),
+      });
     } catch (error) {
       // §9 最后一行：插件内部异常必须显式阻断，不能依赖 pi"handler 抛错即阻断"的行为。
       const outcome = failClosed(
@@ -367,6 +375,37 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
     return request.origin === "user_bash"
       ? (config.userBashPolicy.model ?? config.reviewer.model)
       : config.reviewer.model;
+  }
+
+  /**
+   * 子代理会话的默认动作下限（FR-56）。
+   *
+   * 只在命中子代理会话、且 `subagentPolicy.enabled` 时生效，取值只能是 `deny` / `ask` / `review`
+   * （schema 已禁止 `allow`），因此它只可能收紧。它作用在默认动作矩阵这一层：用户显式规则、
+   * 只读白名单与 `onUnresolvedFacts` 各自的分支不受影响（详见 `policy/evaluate.ts`）。
+   */
+  function defaultActionFloor(config: ResolvedConfig): Action | undefined {
+    if (!deps.runtime.isSubagentSession || !config.subagentPolicy.enabled) {
+      return undefined;
+    }
+    return config.subagentPolicy.defaultAction;
+  }
+
+  /**
+   * 本会话是否可以使用和创建会话授权（FR-29/56）。
+   *
+   * 子代理会话在 `subagentPolicy.enabled` 且 `allowSessionGrants=false`（默认）时两侧都禁止：
+   * 既不能用父会话的授权，也不能建立自己的。`subagentPolicy.enabled=false` 表示不适用子代理策略，
+   * 回到 `sessionGrants.enabled`。
+   */
+  function sessionGrantsAllowed(config: ResolvedConfig): boolean {
+    if (!config.sessionGrants.enabled) {
+      return false;
+    }
+    if (!deps.runtime.isSubagentSession) {
+      return true;
+    }
+    return !config.subagentPolicy.enabled || config.subagentPolicy.allowSessionGrants;
   }
 
   /**
@@ -502,7 +541,7 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
       !hasUnresolved &&
       !anyDeny &&
       !fastPathBlocked &&
-      config.sessionGrants.enabled &&
+      sessionGrantsAllowed(config) &&
       isCallGranted(grantedObjects, deps.runtime.grants.keys, globOptions)
     ) {
       action = "allow";
@@ -711,7 +750,7 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
       };
     }
 
-    const suggestions = config.sessionGrants.enabled
+    const suggestions = sessionGrantsAllowed(config)
       ? grantKeysForObjects(grantedObjects).map((key) => formatGrantKey(encodeGrantKey(key)))
       : [];
     const targets = collectTargets(input.call);
@@ -727,6 +766,15 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
     });
 
     if (decision?.choice === "session") {
+      if (!sessionGrantsAllowed(config)) {
+        // 本会话不提供会话授权（子代理会话且 allowSessionGrants=false，FR-56）。
+        // 对话框本来就不会给出这个选项；真收到它时不静默降级为"仅此次"，也不写入授权。
+        return {
+          action: "deny",
+          source: "human",
+          reason: "本会话不允许创建会话授权（FR-56），无法执行「本会话允许此类」，按拒绝处理。",
+        };
+      }
       // 只有这里能创建会话授权（FR-29）：评审模型的 allow 与缓存都不写入。
       for (const key of grantKeysForObjects(grantedObjects)) {
         deps.runtime.grants.keys.add(encodeGrantKey(key));
@@ -819,7 +867,9 @@ function describeRule(evaluation: ObjectEvaluation): string {
   }
   if (evaluation.source === "baseline") {
     const label = evaluation.matchedSurface ?? "surface";
-    return `未命中用户规则，按默认动作矩阵（${label} → ${evaluation.action}）处理`;
+    const head = `未命中用户规则，按默认动作矩阵（${label} → ${evaluation.action}）处理`;
+    // baseline 也可能带理由：配置失效时的收紧、子代理会话的默认动作下限。
+    return evaluation.reason === undefined ? head : `${head}：${evaluation.reason}`;
   }
   const layer = LAYER_LABEL[evaluation.matchedLayer ?? ""] ?? evaluation.matchedLayer ?? "";
   const head = `命中规则 "${evaluation.matchedPattern ?? "*"}"（${layer}）→ ${evaluation.action}`;

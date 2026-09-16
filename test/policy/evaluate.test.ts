@@ -4,9 +4,14 @@ import type { CommandUnit, Facts, PathTarget } from "../../src/facts/types.ts";
 import {
   buildPolicyObjects,
   evaluateCall,
+  evaluateObject,
+  SUBAGENT_FLOOR_REASON,
   type CallEvaluation,
+  type PolicyObject,
 } from "../../src/policy/evaluate.ts";
+import { BASELINE_REASON } from "../../src/config/normalize.ts";
 import { compileRuleTable } from "../../src/policy/rules.ts";
+import type { Action } from "../../src/policy/action.ts";
 import { resolveConfig, type ResolveOptions } from "../support/resolved-config.ts";
 
 /**
@@ -61,6 +66,7 @@ function evaluate(
   toolName: string,
   facts: Facts,
   options: ResolveOptions = {},
+  defaultActionFloor?: Action,
 ): { call: CallEvaluation } {
   const config = resolveConfig(options);
   return {
@@ -69,6 +75,7 @@ function evaluate(
       toolName,
       config,
       table: compileRuleTable(config, GLOB),
+      ...(defaultActionFloor === undefined ? {} : { defaultActionFloor }),
     }),
   };
 }
@@ -443,5 +450,87 @@ describe("调用级合成（FR-59/FR-61/FR-62）", () => {
     expect(call.cause).toBe("objects");
     expect(call.action).toBe("allow");
     expect(call.decisive).toBeUndefined();
+  });
+});
+
+describe("子代理默认动作下限（FR-56）", () => {
+  it("把默认动作矩阵抬到 subagentPolicy.defaultAction（baseline allow → review）", () => {
+    const { call } = evaluate(
+      "read",
+      toolFacts("read", [target("/repo/a.txt", "read")]),
+      {},
+      "review",
+    );
+
+    expect(call.action).toBe("review");
+    expect(call.decisive?.source).toBe("baseline");
+    expect(call.decisive?.reason).toContain(SUBAGENT_FLOOR_REASON);
+    // 命中的仍是默认矩阵那条规则，只是动作被抬升。
+    expect(call.decisive?.matchedLayer).toBe("baseline");
+    expect(call.decisive?.matchedPattern).toBe("*");
+  });
+
+  it("下限只能收紧：不同取值都按最严格者生效", () => {
+    const facts = toolFacts("read");
+    expect(evaluate("read", facts, {}, "ask").call.action).toBe("ask");
+    expect(evaluate("read", facts, {}, "deny").call.action).toBe("deny");
+  });
+
+  it("baseline 本来就达到下限时不改写理由", () => {
+    const { call } = evaluate("write", toolFacts("write"), {}, "review");
+
+    expect(call.action).toBe("review");
+    expect(call.decisive?.reason).toBe(BASELINE_REASON);
+    expect(call.decisive?.reason).not.toContain(SUBAGENT_FLOOR_REASON);
+  });
+
+  it("用户显式规则不受下限影响（既不放宽也不覆盖）", () => {
+    const allowed = evaluate(
+      "read",
+      toolFacts("read"),
+      { global: { permission: { read: "allow" } } },
+      "deny",
+    );
+    expect(allowed.call.action).toBe("allow");
+    expect(allowed.call.decisive?.source).toBe("rule");
+
+    const denied = evaluate(
+      "bash",
+      commandFacts("bash", [unit("rm -rf /")]),
+      { global: { permission: { bash: { "rm -rf /": "deny" } } } },
+      "review",
+    );
+    expect(denied.call.action).toBe("deny");
+    expect(denied.call.decisive?.source).toBe("rule");
+  });
+
+  it("只读白名单与失败分支不属于默认动作，不受下限影响（已文档化的边界）", () => {
+    const readOnly = evaluate(
+      "bash",
+      commandFacts("bash", [unit("ls -la", { readOnly: true })]),
+      {},
+      "deny",
+    );
+    expect(readOnly.call.action).toBe("allow");
+    expect(readOnly.call.decisive?.source).toBe("read-only");
+
+    const unresolved = evaluate(
+      "bash",
+      commandFacts("bash", [unit("bash -c hidden", { unresolved: "opaque-wrapper" })]),
+      { global: { onUnresolvedFacts: "allow" } },
+      "deny",
+    );
+    expect(unresolved.call.action).toBe("allow");
+    expect(unresolved.call.decisive?.source).toBe("unresolved");
+  });
+
+  it("path_read / path_write 仍然不表态，不因下限变成投票面", () => {
+    const config = resolveConfig({});
+    const objects = buildPolicyObjects(toolFacts("read", [target("/repo/a.txt", "read")]), "read");
+    const table = compileRuleTable(config, GLOB);
+    const path = objects.find((object) => object.kind === "path") as PolicyObject;
+
+    const evaluation = evaluateObject(path, table, "review", "deny");
+    expect(evaluation.action).toBeUndefined();
   });
 });

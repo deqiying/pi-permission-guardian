@@ -16,6 +16,7 @@ import { textOfContent } from "../review/transcript.ts";
 import { createCommandHandler } from "./commands.ts";
 import { createSessionController } from "./startup.ts";
 import { createRuntime, type GuardianRuntime } from "./state.ts";
+import { createSubagentController } from "./subagents.ts";
 import { createUserBashController } from "./user-bash.ts";
 
 export const GUARDIAN_EVENTS = [
@@ -87,6 +88,10 @@ export function registerGuardian(
   // 订阅在组合阶段就位（早于任何会话），以便捕获后加载的同类扩展在 session_start 发的声明。
   userBash.watchClaims();
 
+  const subagents = createSubagentController({ pi, runtime, warn: deps.warn });
+  // 同理：父实例必须从第一会话起就在听子代理生命周期（FR-55）。
+  subagents.watchLifecycle();
+
   const commandHandler = createCommandHandler({
     runtime,
     audit,
@@ -137,10 +142,16 @@ export function registerGuardian(
     });
   }
 
-  pi.on("session_start", (_event, ctx) => {
+  pi.on("session_start", async (_event, ctx) => {
     userBash.attachContext(ctx);
+    subagents.attachContext(ctx);
     userBash.publishClaim();
-    return controller.sessionStart(ctx);
+    await controller.sessionStart(ctx);
+    // 识别子代理会话（FR-56）：必须在 runtime 重置之后，否则标记会被清掉。
+    // 命中时重新渲染状态栏，让“子代理”这个前提下当下可见。
+    if (subagents.detectSelf(ctx)) {
+      controller.updateStatusBar(ctx);
+    }
   });
   pi.on("before_agent_start", (event, ctx) => controller.beforeAgentStart(ctx, event));
   // 会话中途追加的用户消息（steer / followUp）也要参与授权版本（FR-33）。
@@ -162,6 +173,7 @@ export function registerGuardian(
   pi.on("user_bash", (event, ctx) => userBash.handler(event, ctx));
   pi.on("session_shutdown", async (_event, ctx) => {
     userBash.attachContext(undefined);
+    subagents.attachContext(undefined);
     await controller.sessionShutdown(ctx);
   });
 
