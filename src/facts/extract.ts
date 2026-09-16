@@ -1,7 +1,9 @@
 import { collectSurfaces } from "./classify.ts";
 import { resetPathValueCache } from "./path-value.ts";
 import { ensureBashParser, getBashParser, parseBashWith } from "./bash/parser.ts";
+import { collectCompositeTexts } from "./bash/composites.ts";
 import { enumerateBashUnits, type BashEnumeration } from "./bash/enumerate.ts";
+import { normalizeCommandText } from "./command-text.ts";
 import { executableName } from "./bash/wrappers.ts";
 import { extractFallbackPaths, lookupToolPathExtractor } from "./extractor-registry.ts";
 import { extractToolPaths, hasToolPathRule, readStringField } from "./readonly-paths.ts";
@@ -84,11 +86,14 @@ function extractBashFacts(
     return opaqueBashFacts(command, "unavailable");
   }
   let enumeration: BashEnumeration;
+  let compositeTexts: string[];
   try {
     enumeration = enumerateBashUnits(tree, context);
+    // 文本必须在树被释放前拷出（WASM 的节点句柄在 delete 后不可用）。
+    compositeTexts = collectCompositeTexts(tree.rootNode);
   } finally {
     // WASM 线性内存只有显式 delete 才会回收：不释放的话每次 bash 调用都漏一棵语法树。
-    // 枚举是同步且已完成拷贝的，这里释放安全。
+    // 枚举与文本收集都是同步且已完成拷贝的，这里释放安全。
     tree.delete();
   }
   const paths = enumeration.commands.flatMap((unit) => unit.paths);
@@ -97,6 +102,7 @@ function extractBashFacts(
     surfaces: collectSurfaces("bash", paths),
     commands: enumeration.commands,
     paths,
+    compositeTexts,
     parserUsed: "tree-sitter",
   };
   const unresolved = overallCause(enumeration.unresolved, enumeration.commands);
@@ -154,6 +160,9 @@ function opaqueBashFacts(
     surfaces: collectSurfaces("bash", []),
     commands: [unit],
     paths: [],
+    // 没有解析器时只能拿整条原文当调用级文本：模式命中依然是保守方向
+    // （规则里的 deny / ask / review 都能命中），不会因为降级而放过。
+    compositeTexts: [normalizeCommandText(command)],
     unresolved: unit.unresolved,
     unresolvedAt: [unit.text],
     parserUsed,
@@ -202,6 +211,8 @@ function powershellFacts(input: unknown): ExtractResult {
     surfaces: collectSurfaces("powershell", []),
     commands: [unit],
     paths: [],
+    // 与 bash 降级路径同理：模式只能整条匹配原文。
+    compositeTexts: [normalizeCommandText(command)],
     unresolved: "unparsed-language",
     unresolvedAt: [unit.text],
   };

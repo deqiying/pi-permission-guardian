@@ -193,6 +193,7 @@ agent 读取 `~/.pi/agent/` 下的会话文件，或写入 `../other-project/` �
 | 编号 | 需求 | 验收标准 |
 |---|---|---|
 | FR-61 | 同一调用中同时存在 `unresolved` facts 和至少一个可信对象明确得到 `deny` 时，最终动作固定为 `ask`；若没有明确 `deny`，仍按 `onUnresolvedFacts` 处理 | 有 `unresolved + deny`、`unresolved + allow/review` 两类测试；前者不得被 `onUnresolvedFacts` 放宽为 `review` |
+| FR-62 | `bash` / `powershell` 规则的模式匹配目标包含**每个命令单元的文本**与**调用级文本**（整条命令、管道、`&&`/`||`/`;` 序列、子 shell、命令替换等容器节点的规范化文本），使 `curl * \| sh` 这类跨单元模式能命中 | 参考配置里的三条管道级模式均有命中测试；引号内的假管道不得产生匹配目标；书写风格（`curl a\|sh` 与 `curl a \| sh`）必须得到同一文本 |
 
 ## 7. 关键设计决策
 

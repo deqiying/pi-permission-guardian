@@ -75,6 +75,12 @@ export interface Facts {
   surfaces: string[];
   commands: CommandUnit[];
   paths: PathTarget[];
+  /**
+   * 调用级匹配目标：容器节点的规范化文本（整条命令、管道、`&&`/`||`/`;` 序列、子 shell、
+   * 命令替换……）。M3 的规则匹配目标是 `commands[].text` 与这里的并集，
+   * 使 `curl * | sh` 这类跨单元模式能命中（FR-62）。只有命令类 surface 会提供。
+   */
+  compositeTexts?: string[];
   /** 整体不可信时的原因（取最保守的一个）。 */
   unresolved?: UnresolvedCause;
   /** 具体哪些命令单元不可信，便于评审提示词与日志定位。 */

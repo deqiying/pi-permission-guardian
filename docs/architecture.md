@@ -379,6 +379,9 @@ parser.setLanguage(await Language.load(bashWasm));
 | 解析失败的子树 | 标记 `unresolved` 并降级；整棵树有 ERROR 时**所有**单元都标记 `parse-error` 且 `readOnly=false` | FR-14：语法没读懂时"命中只读白名单"不能作为放行依据 |
 | 解析失败但没有任何可识别命令（`((`、`if true`） | 补一个"整条命令不可信"的兜底单元 | 否则 §4.2 规则 5 无从生效：决定权会落到 surface 默认动作上，`permission.bash = allow` 时解析失败就变成静默放行 |
 | 命令文本 | 剥离前导赋值与重定向片段后作为 `text` | 去掉赋值才能匹配 `rm *`；去掉重定向才能让 `rm -rf / > /dev/null` 仍命中 `rm -rf /` |
+| 调用级文本（`compositeTexts`） | 收集容器节点（`program` / `pipeline` / `list` / 子 shell / 命令替换 / `if`/`for`/`while`/`case` / 函数体 / 重定向语句）的文本，规范化空白与操作符两侧空格，按源码顺序去重 | FR-62：跨单元模式（`curl * | sh`）必须有匹配目标。引号内的假管道不是 `pipeline` 节点，不会产生目标 |
+
+**调用级文本的规范化**（`facts/command-text.ts`）：折叠空白（含换行与行继续）并把 `|` / `||` / `&&` / `;` 两侧补成单个空格，否则 `curl a|sh`、`curl a | sh`、`curl a |\n sh` 会得到三个不同字符串，配置里写 `curl * | sh` 只能命中其中一种。已知副作用：引号内的操作符也会被补空格，但这只影响调用级文本；单元文本保持原样，因此不改变“实际执行了什么”的判断。
 
 **降级语义**（`onUnresolvedFacts`，默认 `review`）：不是"放行"，而是"由模型在完整上下文里判断"。配置可选 `ask` 或 `deny`。注意 `opaque-wrapper` 场景下模型也可能无从判断，因此该配置的价值在于给用户一个更严格的选项。
 
@@ -467,6 +470,12 @@ interface CompiledRule {
 - `~/`、`$HOME/` 展开为用户主目录
 - Windows 下模式与值双侧折叠（大小写不敏感 + 分隔符归一）；POSIX 保持大小写敏感
 - 整体模式锚定为 `^…$`
+
+**匹配目标**（FR-62）：
+
+- 命令类 surface（`bash` / `powershell`）的规则同时匹配**每个命令单元的文本**与**调用级文本**（`facts.compositeTexts`）。两者缺一不可：只有单元文本时 `curl * | sh` 命不中，只有调用级文本时 `rm -rf / > /dev/null` 会因重定向段落而漏掉。
+- 同一条规则在多个目标上命中时按最严格者裁决（不因“另一个目标没命中”而放宽）。
+- 路径类规则匹配路径对象的词法形与真实形（§5.3）；工具类规则匹配工具名与 `*` 兜底面。
 
 ### 6.4 默认动作矩阵（FR-8）
 
@@ -835,7 +844,7 @@ pi install git:github.com/<owner>/pi-permission-guardian@v0.1.0
 
 | 层 | 手段 | 覆盖目标 |
 |---|---|---|
-| `facts/bash` | 语料库驱动：`test/fixtures/*.txt` 每行一条命令 + 期望 facts（JSON） | FR-11~FR-15。语料必须包含：管道、`&&`、命令替换、子 shell、heredoc、`<>`、`sudo`/`xargs`/`bash -c`、变量拼接、Windows 路径与 `/c/...` MSYS 形式（语料里的 `/c/...` 按 POSIX 断言"不做转换"；MSYS 转换在 `test/facts/bash-corpus.test.ts` 的 Windows 语义用例里断言） |
+| `facts/bash`、`facts/command-text` | 语料库驱动：`test/fixtures/*.txt` 每行一条命令 + 期望 facts（JSON）；调用级文本（FR-62）在 `test/facts/bash/composites.test.ts` 单独断言 | FR-11~FR-15、FR-62。语料必须包含：管道、`&&`、命令替换、子 shell、heredoc、`<>`、`sudo`/`xargs`/`bash -c`、变量拼接、Windows 路径与 `/c/...` MSYS 形式（语料里的 `/c/...` 按 POSIX 断言"不做转换"；MSYS 转换在 `test/facts/bash-corpus.test.ts` 的 Windows 语义用例里断言） |
 | `facts` 路径 | 表驱动 | FR-16/17，含 Windows 大小写与分隔符、符号链接双形 |
 | `policy` | 纯函数单测 | FR-1~FR-10、FR-59、FR-61，重点是 last-match-wins、跨层最严格者合并、混合命令冲突与 `unresolved + deny -> ask` |
 | `review/verdict` | 输入输出快照 | FR-21/22，覆盖围栏 JSON、前后缀噪声、缺字段、非法枚举值、非 JSON |

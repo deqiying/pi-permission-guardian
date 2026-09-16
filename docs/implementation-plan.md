@@ -163,16 +163,17 @@ test/fixtures/bash/*.json
 3. 用 `web-tree-sitter` 与 `tree-sitter-bash` 初始化 WASM parser；通过 `createRequire(import.meta.url)` 定位两个 wasm 文件。
 4. 在 `before_agent_start`（首次时）预热 parser，失败时每会话提示一次。初始化失败时保留可重试错误，不把失败缓存为永久成功状态。
 5. 枚举 `&&`、`||`、管道、命令替换、进程替换、子 shell、compound statement、heredoc 和 redirect 中的执行单元。
-6. 对 parse error、动态命令名、不可解析包装器产生 unresolved 标记；不得将已解析部分当作完整事实。
-7. 识别 `sudo`、`xargs`、`bash -c`、`eval` 等间接执行并保守降级。
-8. 对命令和路径执行 `$HOME`、`$PWD`、`~/`、Windows 路径和 MSYS 形式（`/c/x` → `C:\x`，仅 Windows 目标平台）归一化。
-9. 只读命令白名单严格使用“可执行名 + 参数前缀”，内置集合保持最小（面向工作目录的只读操作），不为特定选项增加例外；带路径值的 `--opt=value` 会取消该次调用的免评审资格。
+6. 收集容器节点的规范化文本作为调用级匹配目标（FR-62），使配置里的 `curl * | sh` 这类跨单元模式能命中。
+7. 对 parse error、动态命令名、不可解析包装器产生 unresolved 标记；不得将已解析部分当作完整事实。
+8. 识别 `sudo`、`xargs`、`bash -c`、`eval` 等间接执行并保守降级。
+9. 对命令和路径执行 `$HOME`、`$PWD`、`~/`、Windows 路径和 MSYS 形式（`/c/x` → `C:\x`，仅 Windows 目标平台）归一化。
+10. 只读命令白名单严格使用“可执行名 + 参数前缀”，内置集合保持最小（面向工作目录的只读操作），不为特定选项增加例外；带路径值的 `--opt=value` 会取消该次调用的免评审资格。
 
 ### 测试语料
 
 至少覆盖：
 
-- 单命令、管道、`&&`、`||`、分号
+- 单命令、管道、`&&`、`||`、分号；管道级模式的命中（`curl * | sh`）与引号内假管道的不命中
 - `$()`、反引号、`<()`、`>()`、子 shell
 - heredoc、输入重定向、输出重定向、`<>`
 - `sudo`、`xargs`、`bash -c`、`sh -c`、`eval`
@@ -208,7 +209,7 @@ src/interact/dialog.ts
 ### 实现顺序
 
 1. 定义动作严格度、同层 last-match-wins 和跨层最严格者合并。
-2. 实现 glob 编译与匹配，覆盖命令、路径、工具名和 `*` 兜底。
+2. 实现 glob 编译与匹配：命令类规则同时匹配命令单元文本与调用级文本（FR-62），路径类规则匹配路径对象，工具类规则匹配工具名，另有 `*` 兜底。
 3. 每个命令单元或路径对象独立求值，再按调用级规则合并。
 4. 实现固定优先级：`unresolved + trusted deny -> ask`，其次处理 `allow + deny` 的 `onMixedCommandActions`，最后处理普通 `unresolved`。
 5. 会话授权只接受人工对话框确认；模型 allow、缓存、自动审核和用户手输命令本身不能创建 grant。
