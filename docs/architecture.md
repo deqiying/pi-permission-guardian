@@ -62,7 +62,7 @@ pi-permission-guardian/
 │   │   ├── paths.ts                # 全局/项目配置路径解析
 │   │   ├── jsonc.ts                # JSONC 剥离（注释 + 尾逗号，保留换行以对齐行号）
 │   │   ├── load.ts                 # 读取 → 校验 → 默认值填充 → 失败降级
-│   │   ├── merge.ts                # 跨层合并（最严格者胜）
+│   │   ├── merge.ts                # 跨层合并（规则动作与混合命令策略最严格者胜）
 │   │   └── normalize.ts            # 语法糖展开 + baseline 规则合成
 │   ├── facts/
 │   │   ├── types.ts                # Facts / CommandUnit / PathTarget / Direction
@@ -181,8 +181,11 @@ tool_call(event, ctx)
  ├─ 5. 缓存查询（仅当 facts 无 unresolved）
  │      hit ──► 复用结论（来源=cache）
  │
- ├─ 6. 规则求值 evaluate(facts) ─► { action, matchedPattern, surface }
+ ├─ 6. 规则求值 evaluate(facts) ─► 各对象的 action
  │      未命中 ──► defaultAction（按 surface 矩阵，默认 read→allow / 其余→review）
+ │      多个已解析命令单元同时得到 allow 与 deny
+ │        ──► onMixedCommandActions（默认 deny）
+ │      未触发混合冲突 ──► 所有对象取最严格者
  │
  ├─ 7. 按 action 分派
  │      allow  ──► 放行
@@ -234,13 +237,26 @@ gate 决定"哪些工具调用进入规则求值"，**不是**"哪些调用会�
 同一 surface 内可能有**多条**规则命中（多命令单元、多个路径各自命中）。规则：
 
 1. 每个被裁决对象（命令单元 / 路径）**独立**求值，取各自命中的最严动作。
-2. 整个调用的最终动作 = 所有对象动作的**最严格者**。
-3. 只要有任意对象是 `unresolved`，整个调用走 `onUnresolvedFacts`。
+2. facts 可信时，如果同一 shell 调用的多个命令单元中同时存在裁决结果为 `allow` 和 `deny` 的单元，则整个调用的动作改为 `onMixedCommandActions`（默认 `deny`，可配置 `ask` / `review` / `deny`）。
+3. 未触发上述混合冲突时，整个调用的最终动作 = 所有对象动作的**最严格者**。
+4. 只要有任意对象是 `unresolved`，整个调用走 `onUnresolvedFacts`。
 
-这条"never-weaker"原则是护栏正确性的核心不变量：
+对象内部的"never-weaker"原则仍是护栏正确性的核心不变量：
 
-> `echo ok && rm -rf /` 中，第一个命令单元的 `allow` 不得掩盖第二个单元的 `deny`；
-> 反过来，`rm -rf /tmp/x && echo done` 中的 `rm -rf /` 也不能因为前面先出现的普通命令而被跳过求值。
+> 单个命令单元或单个路径内部的多条规则命中，仍必须取最严格结果；
+> `deny + review`、`deny + ask` 等不含 `allow` 的组合也仍取最严格结果。
+
+默认情况下，`echo ok && rm -rf /` 中第一个命令单元的 `allow` 不能掩盖第二个单元的 `deny`。显式配置 `onMixedCommandActions` 后，这是唯一允许在调用级将 `allow` / `deny` 冲突替换为 `ask` 或 `review` 的策略点：
+
+| 命令单元动作集合 | 最终动作 |
+|---|---|
+| 只有 `allow` | `allow` |
+| `allow + deny` | `onMixedCommandActions`，默认 `deny` |
+| `allow + review` | `review` |
+| `allow + ask` | `ask` |
+| `deny + review` / `deny + ask` / 多个 `deny` | `deny` |
+
+该字段是安全敏感配置：全局层未配置时基线为 `deny`，全局层可以显式设为 `ask` / `review` / `deny`；项目层再按 `deny > ask > review` 与其取最严格者。因此项目配置只能收紧，不能把全局的 `deny` 或默认 `deny` 放宽为 `review` / `ask`。
 
 ## 5. 事实提取层
 
@@ -327,7 +343,9 @@ global  config.json（未信任项目时也加载）
 project .pi/extensions/.../config.json（仅 ctx.isProjectTrusted() 为真）
         ↓
 ─ normalize：语法糖展开（path → path_read + path_write）
-─ merge：跨层最严格者胜（仅对 permission 动作；标量字段上层覆盖）
+─ merge：permission 动作跨层最严格者胜
+         onMixedCommandActions：global/default 定义基线，project 仅能收紧
+         其他标量字段上层覆盖
         ↓
 ResolvedConfig（含可执行规则表）
 ```
@@ -383,6 +401,7 @@ interface CompiledRule {
 | `enabled` / `yoloMode` / `reviewLog` / `debugLog` | 总开关、逃生舱、日志级别 | `yoloMode=true` 时所有 `ask`/`review` 重写为 `allow`，状态栏必须显著提示（FR-53） |
 | `gate` / `extraTools` | 评估范围（architecture §4.0） | `side-effect` 覆盖全部 pi 内置工具；自定义/MCP 工具需 `all` 或 `extraTools` |
 | `onReviewUnavailable` / `onUnresolvedFacts` / `onAskWithoutUI` | 三个失败分支的动作（§9） | 默认分别为 `deny` / `review` / `deny` |
+| `onMixedCommandActions` | 同一 shell 调用跨命令单元出现 `allow` / `deny` 冲突时的调用级动作 | 默认 `deny`，可选 `ask` / `review` / `deny`；global/default 定义基线，project 只能收紧 |
 | `reviewer` | 评审模型、deadline、证据循环、风险门槛 | `model` 必填；`maxAllowRiskLevel` 实现 FR-23 |
 | `classifier` | 非阻塞预评分 | `enabled` 默认 `false`（D8） |
 | `circuitBreaker` | 同轮连续/窗口内拒绝阈值 | 阈值 0 表示关闭该条件 |
@@ -603,6 +622,7 @@ key = sha256([
 | verdict 输出非法 | `deny` | `onReviewUnavailable` | 说明"评审未给出可解析的结论" |
 | 模型 deny | `deny` | — | 含风险点 + 反规避条款（FR-26） |
 | 规则 deny | `deny` | — | 含命中的规则模式与自定义 reason |
+| 同一 shell 调用跨命令单元同时出现 `allow` / `deny` | `deny` | `onMixedCommandActions` | 列出冲突的命令单元、各自的裁决与命中规则 |
 | 需要人工确认且无 UI | `deny` | `onAskWithoutUI` | 说明"无交互界面可确认" |
 | 配置解析失败 | `allow` 抬升为 `review` | — | 提示用户配置有误并给出错误定位 |
 | 插件内部异常 | `block` | — | 异常 → 阻断，不让"护栏崩了"等于"放行" |
@@ -707,7 +727,7 @@ pi install git:github.com/<owner>/pi-permission-guardian@v0.1.0
 |---|---|---|
 | `facts/bash` | 语料库驱动：`test/fixtures/*.txt` 每行一条命令 + 期望 facts（JSON） | FR-11~FR-15。语料必须包含：管道、`&&`、命令替换、子 shell、heredoc、`<>`、`sudo`/`xargs`/`bash -c`、变量拼接、Windows 路径与 `/c/...` MSYS 形式 |
 | `facts` 路径 | 表驱动 | FR-16/17，含 Windows 大小写与分隔符、符号链接双形 |
-| `policy` | 纯函数单测 | FR-1~FR-10，重点是 last-match-wins 与跨层最严格者合并 |
+| `policy` | 纯函数单测 | FR-1~FR-10、FR-59，重点是 last-match-wins、跨层最严格者合并与混合命令冲突 |
 | `review/verdict` | 输入输出快照 | FR-21/22，覆盖围栏 JSON、前后缀噪声、缺字段、非法枚举值、非 JSON |
 | `config/jsonc` | 表驱动 | FR-49/50：带注释配置可加载；字符串内 `//` 不被剥离；**注入语法错误后断言报错行号与原文一致** |
 | `config` 整体 | 用提交的 `schemas/guardian.schema.json` 校验 `config/config.json`，并做一组负向用例 | FR-57/58：参考配置是严格 JSON、符合 schema；非法动作值 / 未知字段 / 越界数值均被拒绝 |
@@ -746,4 +766,3 @@ pi install git:github.com/<owner>/pi-permission-guardian@v0.1.0
 | `tool_call` handler 成为进程内单点 | 插件异常影响所有工具调用 | 最外层 try/catch 显式返回 block；单元测试覆盖异常路径 |
 | 与 pi 上游 API 演进的耦合 | `complete` 等 API 未在文档中正式条目化 | 用最小 API 面（`find` / `complete`）；`peerDependencies` 声明下限；集成测试用真实 pi 版本 |
 | 与其他 `tool_call` 拦截型扩展共存 | 双重决策或重复弹窗 | 护栏行为全部经 `/perm status` 可观察；README 明确列出已知的同类型扩展及其影响 |
-

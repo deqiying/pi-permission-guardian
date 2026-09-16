@@ -12,6 +12,7 @@
   "onReviewUnavailable": "deny",
   "onUnresolvedFacts": "review",
   "onAskWithoutUI": "deny",
+  "onMixedCommandActions": "deny",
 
   "reviewer": {
     "model": "deepseek/deepseek-flash",

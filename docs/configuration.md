@@ -57,19 +57,41 @@ config 解析失败时 fail-closed：该层的所有 `allow` 抬升为 `review`�
 
 反例：不要为了"省成本"把读取类工具排除在 `gate` 之外 —— 那样 `path` 中的 `*.env → deny` 对 `read ./.env` 永远不会生效，敏感文件保护会出现真实缺口。
 
-## 4. 失败语义
+## 4. 失败与冲突语义
 
-三个开关分别对应三类"不确定"状态，默认全部落在保守侧（FR-46、architecture §9）。
+三个失败开关分别对应三类"不确定"状态，默认全部落在保守侧（FR-46、architecture §9）；`onMixedCommandActions` 处理确定的跨命令单元动作冲突（FR-59）。
 
 | 字段 | 默认 | 触发场景 |
 |---|---|---|
 | `onReviewUnavailable` | `"deny"` | 评审超时 / 模型报错 / 输出无法解析 / `reviewer.model` 未配置（FR-19） |
 | `onUnresolvedFacts` | `"review"` | bash 解析失败、包装器（`bash -c`、`sudo`、`xargs`）内部不可展开、路径非字面量（FR-12/14/15） |
 | `onAskWithoutUI` | `"deny"` | 需要人工确认但没有交互界面：`print` / `json` 模式、后台子代理 |
+| `onMixedCommandActions` | `"deny"` | 同一 shell 调用的多个已解析命令单元中，同时存在裁决结果为 `allow` 与 `deny` 的单元 |
 
 `onReviewUnavailable` 默认 `deny` 的理由：`unavailable` 是基础设施结果，不是安全结论。若放行，等于让"拔网线 / 配错模型名"成为绕过手段。
 
 拦截时的提示文案有硬要求（FR-27）：必须说明"评审未完成，不代表因风险被拒"，避免 agent 把基础设施故障学成"这个操作不安全"。
+
+### 4.1 多命令单元的 allow / deny 冲突
+
+`onMixedCommandActions` 只允许配置为 `"deny"`、`"ask"` 或 `"review"`，不能配置为 `"allow"`。它不会改变单个对象内部的规则裁决，只负责给调用级的 `allow` / `deny` 冲突选择最终动作：
+
+| 多个命令单元的动作组合 | 最终动作 |
+|---|---|
+| `allow + deny` | `onMixedCommandActions`，默认 `deny` |
+| `allow + review` | `review` |
+| `allow + ask` | `ask` |
+| `deny + review` / `deny + ask` / 多个 `deny` | `deny` |
+
+例如：
+
+```bash
+echo ok && rm -rf /
+```
+
+默认得到 `deny`；配置 `"onMixedCommandActions": "review"` 后，整条调用交给评审模型；配置为 `"ask"` 后交给人工确认。
+
+该字段是安全敏感项，全局层未配置时基线为 `deny`，全局层可以显式选择 `ask` / `review` / `deny`；项目层再按 `deny > ask > review` 与全局层取最严格者。项目配置只能把全局的 `review` 收紧为 `ask` / `deny`，不能把默认或全局的 `deny` 放宽为 `ask` / `review`。`yoloMode=true` 仍可把所有 `ask` / `review` 重写为 `allow`，这是总逃生舱的既有语义。
 
 ## 5. 评审器
 
@@ -169,6 +191,8 @@ config 解析失败时 fail-closed：该层的所有 `allow` 抬升为 `review`�
 2. **跨配置层（全局 vs 项目）：最严格者胜**，`deny > ask > review > allow`（FR-6）
 
 第 2 条确保项目配置无法放宽全局的安全底线——否则任何 clone 来的仓库里的 `.pi/extensions/.../config.json` 都是一条提权路径。
+
+命令单元之间的 `allow` / `deny` 冲突属于调用级策略，按 §4.1 的 `onMixedCommandActions` 处理；该字段由 global/default 定义基线，项目层只能收紧。
 
 `ask` 排在 `review` 之前：写 `ask` 的意图是"我要亲自看"，它必须能压过任何模型判定。
 

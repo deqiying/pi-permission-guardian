@@ -101,6 +101,11 @@
       "default": "deny",
       "description": "需要人工确认但没有交互界面（print / json 模式、后台子代理）时的动作（FR-46）。"
     },
+    "onMixedCommandActions": {
+      "enum": ["deny", "ask", "review"],
+      "default": "deny",
+      "description": "同一 shell 调用的多个已解析命令单元同时得到 allow 与 deny 时的调用级动作（FR-59）。不能配置为 allow；global/default 定义基线，project 仅能按 deny > ask > review 收紧。"
+    },
 
     "reviewer": {
       "type": "object",
