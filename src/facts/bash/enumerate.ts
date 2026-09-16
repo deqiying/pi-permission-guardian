@@ -1,8 +1,8 @@
 import type { Node as SyntaxNode, Tree } from "web-tree-sitter";
 
 import { analyzeCommandArgs } from "./path-tokens.ts";
-import { analyzeRedirect, collectRedirects, type RedirectOptions } from "./redirects.ts";
-import { matchReadOnlyCommands } from "./readonly-commands.ts";
+import { analyzeRedirect, collectRedirects, isRedirectNode, type RedirectOptions } from "./redirects.ts";
+import { isReadOnlyUnit, matchReadOnlyCommands } from "./readonly-commands.ts";
 import { classifyWrapper, executableName, unresolvedCauseForWrapper } from "./wrappers.ts";
 import type { CommandUnit, FactsContext, PathTarget, UnresolvedCause } from "../types.ts";
 
@@ -54,6 +54,18 @@ export function enumerateBashUnits(
       // 同理：语法没读懂时，"命中了只读白名单"不能作为放行依据。
       command.readOnly = false;
     }
+    if (commands.length === 0 && root.text.trim().length > 0) {
+      // `((` / `if true` 这类：报错了，但语法树上没有任何可当命令的对象。
+      // 必须留下一个"整条命令不可信"的保守对象，否则 §4.2 规则 5（有 unresolved 对象
+      // 就走 onUnresolvedFacts）无从生效，决定权会落到 surface 默认动作上——用户一旦把
+      // `permission.bash` 配成 allow，解析失败就变成了静默放行。
+      commands.push({
+        text: root.text.trim(),
+        paths: [],
+        readOnly: false,
+        unresolved: "parse-error",
+      });
+    }
   }
 
   const unresolvedAt = commands
@@ -80,6 +92,14 @@ function walk(
   if (node.type === "redirected_statement") {
     // 复合语句（子 shell、`{ ...; }`）的重定向作用于内部所有命令，一并传下去。
     redirects = [...inheritedRedirects, ...collectRedirects(node)];
+    if (node.childForFieldName("body") === null) {
+      // `> .env` 这类**没有 body 的重定向语句**是合法的：bash 会真的截断/创建那个文件，
+      // 只是什么都没执行。不给它生成对象，写目标就对规则完全不可见。
+      const unit = buildRedirectOnlyUnit(node, redirects, redirectOptions);
+      if (unit !== undefined) {
+        commands.push(unit);
+      }
+    }
   }
 
   if (EXECUTABLE_NODE_TYPES.has(node.type)) {
@@ -90,8 +110,46 @@ function walk(
 
   const nextInherited = node.type === "redirected_statement" ? redirects : inheritedRedirects;
   for (const child of node.namedChildren) {
-    walk(child, redirectOptions, context, commands, nextInherited);
+    // 重定向节点内部是重定向**目标**（`> >(cat)`），它自己的命令不继承外层重定向。
+    walk(
+      child,
+      redirectOptions,
+      context,
+      commands,
+      isRedirectNode(child) ? inheritedRedirects : nextInherited,
+    );
   }
+}
+
+/**
+ * 只有重定向、没有命令的语句：产出写/读目标，且明确不是只读。
+ *
+ * 没有任何可报告的东西时（`2>&1` 这种描述符复制）返回 undefined：凭空造一个单元
+ * 只会让每条无害语句都招来一次评审。
+ */
+function buildRedirectOnlyUnit(
+  node: SyntaxNode,
+  redirectNodes: readonly SyntaxNode[],
+  redirectOptions: RedirectOptions,
+): CommandUnit | undefined {
+  const paths: PathTarget[] = [];
+  let ambiguous = false;
+  let dynamic = false;
+  for (const redirect of redirectNodes) {
+    const analysis = analyzeRedirect(redirect, redirectOptions);
+    paths.push(...analysis.paths);
+    ambiguous = ambiguous || analysis.ambiguous;
+    dynamic = dynamic || analysis.dynamic;
+  }
+  if (paths.length === 0 && !ambiguous && !dynamic) {
+    return undefined;
+  }
+  const unresolved = pickCause({ parseError: node.hasError, wrapper: undefined, ambiguous, dynamic });
+  const unit: CommandUnit = { text: node.text.trim(), paths, readOnly: false };
+  if (unresolved !== undefined) {
+    unit.unresolved = unresolved;
+  }
+  return unit;
 }
 
 function buildUnit(
@@ -100,7 +158,8 @@ function buildUnit(
   redirectOptions: RedirectOptions,
   context: FactsContext,
 ): CommandUnit {
-  const executable = findExecutable(node);
+  const executableInfo = findExecutable(node);
+  const executable = executableInfo.name;
 
   // 文本用于 bash surface 规则匹配，因此**不含重定向**：
   // `rm -rf / > /dev/null` 必须仍然能命中 `rm -rf /` 的 deny 规则。
@@ -134,15 +193,16 @@ function buildUnit(
     parseError: node.hasError,
     wrapper,
     ambiguous,
-    dynamic: args.dynamic || redirectDynamic,
+    // 可执行名本身是动态的（`$X -rf /`）时，整条命令的"要点"就不在明面上。
+    dynamic: args.dynamic || redirectDynamic || executableInfo.dynamic,
   });
 
-  const readOnlyMatch = matchReadOnlyCommands(args.words, context.readOnlyCommands);
-  // 不可信的单元不能算只读：白名单命中的是 `cat $f`，而 `$f` 具体是什么并不知道。
-  const readOnly =
-    unresolved === undefined &&
-    readOnlyMatch !== undefined &&
-    paths.every((path) => path.direction === "read");
+  const readOnly = isReadOnlyUnit({
+    matchedEntry: matchReadOnlyCommands(args.words, context.readOnlyCommands),
+    paths,
+    unresolved,
+    pathValuedOption: args.pathValuedOption,
+  });
 
   const unit: CommandUnit = {
     text,
@@ -186,18 +246,29 @@ function pickCause(input: CauseInput): UnresolvedCause | undefined {
 
 /**
  * 可执行名：`command_name` 的第一个词；前导赋值（`FOO=1 rm x`）由语法树单独给出，天然被跳过。
+ *
+ * 同时报出可执行名是否**本身就是动态**（`$X -rf /`、`$(echo rm) -rf /`）：这时命令文本匹配不上
+ * 任何具体规则，单元必须按 FR-15 降级。
  */
-function findExecutable(node: SyntaxNode): string | undefined {
+function findExecutable(node: SyntaxNode): { name?: string; dynamic: boolean } {
   const commandName = node.childForFieldName("name");
   if (commandName === null) {
-    return undefined;
+    return { dynamic: false };
   }
   const first = commandName.namedChildren.length > 0 ? commandName.namedChildren[0] : commandName;
   if (first === undefined) {
-    return undefined;
+    return { dynamic: false };
   }
   const word = first.text.trim();
-  return word.length === 0 ? undefined : executableName(word);
+  if (word.length === 0) {
+    return { dynamic: false };
+  }
+  const dynamic =
+    first.type === "command_substitution" ||
+    first.type === "expansion" ||
+    first.type === "simple_expansion" ||
+    /(^|[^\\])[$`]/.test(word);
+  return { name: executableName(word), dynamic };
 }
 
 /**

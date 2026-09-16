@@ -68,18 +68,40 @@ describe("matchReadOnlyCommands", () => {
   });
 });
 
-describe("isReadOnlyUnit：只读还需要没有写副作用", () => {
+describe("isReadOnlyUnit：只读还需要没有写副作用、单元可信、没有带路径值的选项", () => {
+  const base = { matchedEntry: "cat" as string | undefined, pathValuedOption: false };
+
   it("命中白名单且全是读路径时为真", () => {
     const paths = [makePathTarget("a.txt", "read", "arg", pathOptions)];
-    expect(isReadOnlyUnit("cat", paths)).toBe(true);
+    expect(isReadOnlyUnit({ ...base, paths })).toBe(true);
   });
 
   it("有写路径时为假（`cat > out.txt`）", () => {
     const paths = [makePathTarget("out.txt", "write", "redirect", pathOptions)];
-    expect(isReadOnlyUnit("cat", paths)).toBe(false);
+    expect(isReadOnlyUnit({ ...base, paths })).toBe(false);
+  });
+
+  it("单元不可信时为假（`cat $f` 不能因为 cat 在白名单里就放行）", () => {
+    const paths = [makePathTarget("$f", "read", "arg", pathOptions)];
+    expect(isReadOnlyUnit({ ...base, paths, unresolved: "dynamic-path" })).toBe(false);
+  });
+
+  it("带路径值的选项时为假（`git diff --output=.env` 会真的写文件）", () => {
+    const paths = [makePathTarget(".env", "read", "arg", pathOptions)];
+    expect(
+      isReadOnlyUnit({ matchedEntry: "git diff", paths, pathValuedOption: true }),
+    ).toBe(false);
+  });
+
+  it("没有路径值的选项不影响（`git status --short`）", () => {
+    expect(isReadOnlyUnit({ matchedEntry: "git status", paths: [], pathValuedOption: false })).toBe(
+      true,
+    );
   });
 
   it("没命中白名单时为假", () => {
-    expect(isReadOnlyUnit(undefined, [])).toBe(false);
+    expect(isReadOnlyUnit({ matchedEntry: undefined, paths: [], pathValuedOption: false })).toBe(
+      false,
+    );
   });
 });

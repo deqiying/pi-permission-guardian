@@ -265,6 +265,11 @@ pwd, ls, cat, head, tail, wc, git status, git diff, git log, git show
 
 内置集保持最小和通用，匹配严格使用“可执行名 + 参数前缀”，不为某个选项额外增加分支。省略 `readOnlyCommands` 时使用内置集；一旦显式配置数组，该数组**完整覆盖**内置集，而不是增量追加。`"readOnlyCommands": []` 可关闭默认白名单。`file`、`stat`、`which`、`whoami`、`date`、`echo`、`rg`、`grep`、`find`、`git branch` 及版本查询等命令不进入内置集，用户可以按项目需要显式加入。
 
+两条护栏限制白名单的免评审范围，配自定义条目时需要知道：
+
+- **带路径值的选项会取消免评审资格**：参数里出现 `--output=.env` 这种"带 `=` 且值像路径"的选项时，该次调用不算只读（因为白名单只看可执行名与参数前缀，看不出某个选项会写文件；`git diff --output=<file>` 实测会写文件）。因此往白名单里加命令时，只加**确实不会写文件**的命令。
+- **解析没读懂的命令不算只读**：解析失败、opaque 包装器（`bash -c`、`eval`）、参数里带无法静态展开的取值时，单元一律不判只读，转而走 `onUnresolvedFacts`（默认 `review`）。
+
 ## 8. 规则表 `permission`
 
 ### 8.1 四种动作

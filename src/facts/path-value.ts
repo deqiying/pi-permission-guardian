@@ -28,7 +28,6 @@ export interface PathValueOptions {
 /** realpath 结果缓存：同一次调用里同一个目录会被反复解析（每个目标都要解析父目录）。 */
 const canonicalCache = new Map<string, string | undefined>();
 const CANONICAL_CACHE_LIMIT = 4096;
-
 const WINDOWS = "win32";
 
 /**
@@ -110,17 +109,27 @@ export function makePathValue(raw: string, options: PathValueOptions): PathValue
   }
   const absolute = paths.isAbsolute(raw) ? raw : paths.resolve(cwd, raw);
   const lexical = normalizeSeparators(paths.normalize(absolute), platform);
-  const canonical = options.resolveSymlinks === false ? undefined : canonicalizeFor(lexical, platform);
+  const canonical = options.resolveSymlinks === false ? undefined : canonicalizeFor(absolute, platform);
   return canonical === undefined ? { raw, lexical } : { raw, lexical, canonical };
 }
 
 /**
- * 只在目标平台与宿主平台一致时解析符号链接。
+ * 真实路径：对**未折叠 `..` 的绝对路径**做 realpath。
  *
- * 真实路径是宿主文件系统的属性：拿 Linux 语义去解析 Windows 上的路径只会得到无意义的结果。
+ * 不能在 `normalize` 之后再解析：`cat ./link/../shadow` 的词法形折叠成 `<cwd>/shadow`，
+ * 而内核是先解析软链接再处理 `..`，实际打开的是软链接目标旁边的 `shadow`。先折叠会让
+ * 真实形与词法形一起错，并且把路径错判成"根目录内"从而绕过外部目录规则（FR-16）。
  */
-function canonicalizeFor(lexical: string, platform: NodeJS.Platform): string | undefined {
-  return platform === process.platform ? canonicalizePath(lexical) : undefined;
+function canonicalizeFor(absolute: string, platform: NodeJS.Platform): string | undefined {
+  if (platform !== process.platform) {
+    return undefined;
+  }
+  const native = normalizeSeparators(absolute, platform);
+  return canonicalizePath(native) ?? canonicalizePath(normalizeNative(native));
+}
+
+function normalizeNative(absolute: string): string {
+  return pathModule(process.platform as NodeJS.Platform).normalize(absolute);
 }
 
 /** 只是把 `raw` 包成 PathTarget，附带外部目录判定。 */
@@ -142,8 +151,9 @@ export function makePathTarget(
 /**
  * 路径是否在允许根目录之外。
  *
- * 词法形与真实形都要看：`/tmp` 在很多平台上是指向 `/private/tmp` 的符号链接，
- * 只比较词法形会把根目录内部的路径误判成外部（或反之），所以任一侧判定在根内即视为内部。
+ * 有真实形时**只信真实形**：真实形是内核真正打开的位置，词法形只能作为拿不到真实形时的退路。
+ * 两侧都拿真实形再比（根目录自己也可能是个软链接，例如 macOS 的 `/tmp → /private/tmp`），
+ * 否则"根内 + `..` 穿软链接"的路径会被误判成根内而绕过外部目录规则。
  */
 export function isExternal(
   value: PathValue,
@@ -159,14 +169,15 @@ export function isExternal(
       paths.isAbsolute(root) ? paths.normalize(root) : root,
       platform,
     );
-    if (isUnder(rootLexical, value.lexical, platform)) {
-      return false;
-    }
     if (value.canonical !== undefined) {
       const rootCanonical = canonicalizeFor(rootLexical, platform);
       if (rootCanonical !== undefined && isUnder(rootCanonical, value.canonical, platform)) {
         return false;
       }
+      continue;
+    }
+    if (isUnder(rootLexical, value.lexical, platform)) {
+      return false;
     }
   }
   return true;

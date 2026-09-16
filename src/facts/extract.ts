@@ -1,6 +1,7 @@
 import { collectSurfaces } from "./classify.ts";
+import { resetPathValueCache } from "./path-value.ts";
 import { ensureBashParser, getBashParser, parseBashWith } from "./bash/parser.ts";
-import { enumerateBashUnits } from "./bash/enumerate.ts";
+import { enumerateBashUnits, type BashEnumeration } from "./bash/enumerate.ts";
 import { executableName } from "./bash/wrappers.ts";
 import { extractFallbackPaths, lookupToolPathExtractor } from "./extractor-registry.ts";
 import { extractToolPaths, hasToolPathRule, readStringField } from "./readonly-paths.ts";
@@ -30,6 +31,9 @@ export function extractFactsSync(
   input: unknown,
   context: FactsContext,
 ): ExtractResult | undefined {
+  // realpath 缓存只在**单次提取**内有效：跨调用复用会把"当时"的真实路径当成现在的事实
+  // （软链接目标变了、文件被删了都不会失效），事实层就不再是输入的纯函数。
+  resetPathValueCache();
   if (toolName === "bash") {
     const handle = getBashParser();
     if (handle === undefined) {
@@ -49,6 +53,7 @@ export async function extractFacts(
   input: unknown,
   context: FactsContext,
 ): Promise<ExtractResult> {
+  resetPathValueCache();
   if (toolName === "bash") {
     const command = readStringField(input, "command") ?? "";
     let getHandle = getBashParser();
@@ -78,7 +83,14 @@ function extractBashFacts(
   if (tree === undefined) {
     return opaqueBashFacts(command, "unavailable");
   }
-  const enumeration = enumerateBashUnits(tree, context);
+  let enumeration: BashEnumeration;
+  try {
+    enumeration = enumerateBashUnits(tree, context);
+  } finally {
+    // WASM 线性内存只有显式 delete 才会回收：不释放的话每次 bash 调用都漏一棵语法树。
+    // 枚举是同步且已完成拷贝的，这里释放安全。
+    tree.delete();
+  }
   const paths = enumeration.commands.flatMap((unit) => unit.paths);
 
   const facts: ExtractResult = {
@@ -130,7 +142,9 @@ function opaqueBashFacts(
     text: command.trim(),
     paths: [],
     readOnly: false,
-    unresolved: "unparsed-language",
+    // 两种原因必须分开：`parser-unavailable` 是基础设施故障（提示词与 /perm status
+    // 不能把它说成"这个语言不支持"）。
+    unresolved: parserUsed === "unavailable" ? "parser-unavailable" : "unparsed-language",
   };
   const executable = command.trim().split(/\s+/)[0];
   if (executable !== undefined && executable.length > 0) {
@@ -140,7 +154,7 @@ function opaqueBashFacts(
     surfaces: collectSurfaces("bash", []),
     commands: [unit],
     paths: [],
-    unresolved: "unparsed-language",
+    unresolved: unit.unresolved,
     unresolvedAt: [unit.text],
     parserUsed,
   };

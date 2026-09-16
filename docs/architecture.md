@@ -160,8 +160,8 @@ interface GuardianRuntime {
 | 事件 | 动作 |
 |---|---|
 | 扩展工厂（同步） | 注册 flag、命令、事件；构造 runtime（此时 **不读配置**，因为 `ctx` 不可用） |
-| `session_start` | 读配置、预热 tree-sitter、重置 runtime、按 `--perm` flag 决定是否 engaged、更新状态栏 |
-| `before_agent_start` | 重新读配置（支持热改）、检测模型变化是否影响评审可用性、更新状态栏 |
+| `session_start` | 读配置、重置 runtime、按 `--perm` flag 决定是否 engaged、更新状态栏 |
+| `before_agent_start` | 重新读配置（支持热改）、预热 tree-sitter（失败每会话提示一次）、检测模型变化是否影响评审可用性、更新状态栏 |
 | `turn_start` | 重置熔断器 |
 | `tool_call` | 决策管线（见 §4） |
 | `user_bash` | 用户直接执行命令的决策入口（见 §4.0.1） |
@@ -304,7 +304,8 @@ type UnresolvedCause =
   | "indirection-wrapper"  // sudo/xargs/env/find -exec 等间接执行
   | "dynamic-path"         // 非字面量路径（$DIR、命令替换）
   | "ambiguous-direction"  // <> 这类读写不可证的重定向
-  | "unparsed-language";   // v1 没有该语言的解析器（PowerShell）
+  | "unparsed-language"    // v1 没有该语言的解析器（PowerShell）
+  | "parser-unavailable";  // 解析器自身加载失败（基础设施故障，与"语言不支持"分开报）
 
 interface PathTarget {
   raw: string;             // 原始字面量
@@ -350,9 +351,10 @@ parser.setLanguage(await Language.load(bashWasm));
 
 - `web-tree-sitter` 与 `tree-sitter-bash` 必须放 `dependencies`，因为 `.wasm` 随包发布。
 - 初始化结果**在失败时不缓存**：一次 WASM 加载抖动不应永久毒化解析器，应允许下一次工具调用重试。
-- 在 `before_agent_start` 预热，让首个命令不承担 WASM 加载延迟。
+- 在 `before_agent_start` 预热，让首个命令不承担 WASM 加载延迟；失败时每会话提示一次。
 - parser 是无状态的（`parse` 是输入的纯函数），可在模块级缓存供同步取用。这要求 `tool_call` handler 中"预热已完成"是常态；未完成时回退到异步解析（一次 `await`）。
-- `session_shutdown` 释放 parser；释放后可再次初始化，支持会话重启。
+- `session_shutdown` 释放 parser；释放后可再次初始化，支持会话重启。释放用代次计数，加载中途被释放时不会"复活"。
+- 每次解析产生的 `Tree` 必须显式 `delete()`：WASM 线性内存不靠 GC 回收，否则每次 bash 调用漏一棵树。
 - 解析器不可用时不抛异常：退回"整条命令不可静态展开"的保守 facts（命令原文仍参与 bash surface 规则匹配，`readOnly` 强制为 false）。
 
 **已核实的语法边界**（tree-sitter-bash 0.25.1 / ABI 15）：`cat <> f` 这类 `<>` 重定向**语法树直接报错**
@@ -369,9 +371,13 @@ parser.setLanguage(await Language.load(bashWasm));
 | 子 shell `( … )` | 同上 | FR-11 |
 | 前导赋值 `VAR=x cmd` | 剥离赋值前缀后匹配命令 | 否则 `FOO=1 rm -rf /` 会绕过 `rm *` |
 | 重定向 `>`/`>>`/`<` | 产出写/读 PathTarget | FR-13 |
+| heredoc 之后的重定向（`cat <<EOF > out`） | 必须**递归**收集：该重定向是 `heredoc_redirect` 的子节点，只看直接子节点会漏掉它，让 `cat` 保持只读而免评审放行 | FR-13 |
+| 只有重定向、没有命令（`> .env`） | 产出 write 目标（bash 真的会截断文件）；`2>&1` 这类无可报告内容则不产出单元 | FR-13 |
+| 重定向目标是进程替换（`> >(cat)`） | 目标保持字面并降级；该重定向不向替换内部的命令继承 | FR-13/15 |
 | `<>`（读写） | 同时产出 read 与 write 目标并标记 `ambiguous-direction`；当前语法对 `<>` 报错，实际走 `parse-error` | 语法上不区分读写，只记一个方向会低估风险 |
 | 包装器内部的命令 | **不逐条 gate**，标记 `viaWrapper` 并降级 | FR-12 |
 | 解析失败的子树 | 标记 `unresolved` 并降级；整棵树有 ERROR 时**所有**单元都标记 `parse-error` 且 `readOnly=false` | FR-14：语法没读懂时"命中只读白名单"不能作为放行依据 |
+| 解析失败但没有任何可识别命令（`((`、`if true`） | 补一个"整条命令不可信"的兜底单元 | 否则 §4.2 规则 5 无从生效：决定权会落到 surface 默认动作上，`permission.bash = allow` 时解析失败就变成静默放行 |
 | 命令文本 | 剥离前导赋值与重定向片段后作为 `text` | 去掉赋值才能匹配 `rm *`；去掉重定向才能让 `rm -rf / > /dev/null` 仍命中 `rm -rf /` |
 
 **降级语义**（`onUnresolvedFacts`，默认 `review`）：不是"放行"，而是"由模型在完整上下文里判断"。配置可选 `ask` 或 `deny`。注意 `opaque-wrapper` 场景下模型也可能无从判断，因此该配置的价值在于给用户一个更严格的选项。
@@ -393,6 +399,7 @@ parser.setLanguage(await Language.load(bashWasm));
 | 命令属于内置写类文件命令（`rm` `mv` `cp` `tee` `mkdir` `chmod` …） | 全部非选项参数 | write |
 | 参数看起来像路径（含 `/` 或 `\`、以 `~` / `.` 开头、带盘符） | 是 | 命令非只读时 write |
 | 参数是变量/替换且同时像路径（`"$DIR"/x`） | 是，并标记单元 `dynamic-path` | 同上 |
+| 参数是带路径值的选项（`--output=.env`、`--output='~/x'`） | 是，且**取消该单元的免评审资格**（见下） | 同命令 |
 | URL（`https://…`） | 否 | — |
 | 其余（选项、普通词、不带分隔符的变量） | 否 | — |
 
@@ -400,10 +407,15 @@ parser.setLanguage(await Language.load(bashWasm));
 
 - **为什么给白名单与写类命令的全部参数**：漏掉它们会直接放过 `cat secrets.pem` 这类敏感文件读取。
 - **为什么不给所有命令的全部参数**：`echo note.env` 会因为命中 `*.env` 而被误拦；未知命令只看"看起来像路径"的词。
+- **带路径值的选项取消免评审资格**：`git diff` 之类的白名单条目存在 `--output=<file>` 这类写文件选项（已实测会真实写文件），而白名单匹配固定为"可执行名 + 参数前缀"（D21 不给具体选项开分支）。因此规则按**形状**判断：参数里出现带 `=` 且值像路径的选项时，该单元即使命中也**不算只读**（多取消一次免评审，好过少取消一次）。
 - **未知命令按 write 归因**：`grep -rn x src/` 里的 `src/` 会被记为写方向，从而可能命中 `path_write` 规则。方向比实际更严格，是 fail-closed 的有意选择；需要精确归因的用户可以把命令写进 `permission.bash` 规则或扩展 `readOnlyCommands`。
 - **opaque 包装器不提取路径**：`bash -c 'rm -rf /'` 的参数是代码文本；`indirection` 包装器的参数仍是真实参数（`sudo rm -rf /tmp/x`），照常提取。
 - **动态路径保持字面**：不把 cwd 拼上去（拼接会造出一个看起来真实的假路径），单元同时标记 `dynamic-path`，由 `onUnresolvedFacts` 兜底。
+- **白名单命令的参数可能不是文件**：`git diff HEAD~1` 的 `HEAD~1` 会被当成读路径候选（因为"白名单命令的参数按定义就是文件"）。它通常不命中任何规则、也不改结论，但用户若把 `path_read` 收得很紧，这类"不是文件的参数"会被一起收紧。这是为 `cat secrets.pem` 这类无分隔符文件名故意付出的代价。
 - **路径双形与外部目录**：`lexical` 用目标平台自己的路径实现（`path.posix` / `path.win32`）计算，与被测平台无关；`canonical` 只在目标平台与宿主一致时解析，且对不存在的写目标用"最近存在祖先的真实路径 + 剩余片段"拼出。
+- **真实路径必须对未折叠的路径做 realpath**：`cat ./link/../shadow` 的词法形折叠成 `<cwd>/shadow`，而内核是**先解析软链接再处理 `..`**。先折叠会让真实形与词法形一起错，并把路径错判成"根目录内"，从而绕过外部目录规则。
+- **有真实形时只信真实形**：两侧都取真实形再比（根目录自己也可能是指向别处的软链接），只在拿不到真实形时退回词法形比较。否则"根内路径 + `..` 穿软链接"会被判成根内。
+- **realpath 缓存只覆盖单次提取**：缓存跨调用复用会把"当时"的真实路径当成现在的事实（软链接目标变了、文件删了都不会失效），事实层就不再是输入的纯函数。`extractFacts` 入口会清空缓存。
 
 ## 6. 规则引擎与配置
 

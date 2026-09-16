@@ -37,7 +37,16 @@ interface CorpusFile {
 const fixturesDir = fileURLToPath(new URL("../fixtures/bash/", import.meta.url));
 const corpus = JSON.parse(
   readFileSync(`${fixturesDir}corpus.json`, "utf8"),
-) as CorpusFile;
+) as CorpusFile & { multiLineCases: Record<string, CorpusCase> };
+
+/**
+ * 多行命令（heredoc）无法用 corpus.txt 的"一行一条"表达，单独放在 `multiLineCases` 里。
+ * 两份语料都会逐条断言；`cases` 的键必须与 corpus.txt 完全对应。
+ */
+const allCases: Array<[string, CorpusCase]> = [
+  ...Object.entries(corpus.cases),
+  ...Object.entries(corpus.multiLineCases),
+];
 const corpusLines = readFileSync(`${fixturesDir}corpus.txt`, "utf8")
   .split("\n")
   .map((line) => line.trimEnd())
@@ -58,13 +67,20 @@ describe("bash 语料：断言与语料文件同步", () => {
   });
 
   it("语料条数符合预期（防止文件被意外截断）", () => {
-    expect(corpusLines.length).toBeGreaterThanOrEqual(70);
-    expect(Object.keys(corpus.cases).length).toBeGreaterThanOrEqual(70);
+    expect(corpusLines.length).toBeGreaterThanOrEqual(90);
+    expect(Object.keys(corpus.cases).length).toBeGreaterThanOrEqual(90);
+    expect(Object.keys(corpus.multiLineCases).length).toBeGreaterThanOrEqual(4);
+  });
+
+  it("多行语料真的都是多行（否则它们应该放进 corpus.txt）", () => {
+    for (const key of Object.keys(corpus.multiLineCases)) {
+      expect(key).toContain("\n");
+    }
   });
 });
 
 describe("bash 语料：逐条 facts 断言", () => {
-  for (const [command, expected] of Object.entries(corpus.cases)) {
+  for (const [command, expected] of allCases) {
     it(JSON.stringify(command), async () => {
       const facts = await extractFacts("bash", { command }, corpus.context);
 
@@ -94,10 +110,31 @@ describe("bash 语料：逐条 facts 断言", () => {
       );
       expect(paths).toEqual(expected.paths ?? []);
 
-      // never-weaker：解析失败也必须有保守事实，不能返回"什么都没有"。
-      if (command.trim().length > 0) {
-        expect(facts.commands.length > 0 || facts.unresolved !== undefined).toBe(true);
+      // never-weaker：解析没读懂时，这条命令必须至少留下一个保守对象或降级标记。
+      // （`2>&1` 这类没有可报告内容的语句例外：它不会执行任何命令、也不碰任何文件。）
+      const reportable = facts.commands.length > 0 || facts.unresolved !== undefined;
+      if (command.trim().length > 0 && !/^\d*[<>]&\d+$/.test(command.trim())) {
+        expect(reportable).toBe(true);
       }
+    });
+  }
+});
+
+/**
+ * 故意写坏的命令（语法错、未闭合）：这些必须降级，且**所有**单元都不可信。
+ * 这是 never-weaker 的真实断言——不能写成"语料期望里有 units 所以应该有 units"那种循环。
+ */
+const MALFORMED = ['echo "unclosed', "(()", "if true"];
+
+describe("bash 语料：语法坏掉的命令必须降级", () => {
+  for (const command of MALFORMED) {
+    it(JSON.stringify(command), async () => {
+      const facts = await extractFacts("bash", { command }, corpus.context);
+      expect(facts.unresolved).toBe("parse-error");
+      expect(facts.commands.length).toBeGreaterThan(0);
+      expect(facts.commands.every((unit) => unit.unresolved === "parse-error")).toBe(true);
+      // 解析没读懂时，"命中只读白名单"不能作为放行依据。
+      expect(facts.commands.some((unit) => unit.readOnly)).toBe(false);
     });
   }
 });

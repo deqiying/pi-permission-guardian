@@ -75,3 +75,31 @@ ls -la | grep -c x
 echo "unclosed
 (()
 if true
+
+# 重定向：无 body 的重定向语句、描述符、herersting、&>
+> .env
+2> err.log
+&> all.log
+2>&1
+cat <<< "text"
+# 读方向重定向的目标是动态值时也要降级（FR-15）
+cat < "$IN"
+cat < $IN
+# 选项内嵌路径值（--opt=value）
+git diff --output=.env
+git diff --output="$OUT"
+git diff --output='~/x'
+# 可执行名本身动态（FR-15）
+X=rm; $X -rf /
+# 间接执行包装器与导航类命令
+command rm -rf /
+setsid rm x
+stdbuf -o0 rm x
+sudo -u root rm x
+env FOO=1 rm x
+exec rm x
+pushd /tmp
+popd
+# 变量展开：`~user` 无法得知家目录
+cat ~user/x
+git status --short --branch

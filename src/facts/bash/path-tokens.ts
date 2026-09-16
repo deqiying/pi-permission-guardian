@@ -1,7 +1,7 @@
 import type { Node as SyntaxNode } from "web-tree-sitter";
 
 import { makePathTarget } from "../path-value.ts";
-import { expandNodeText } from "./expansion.ts";
+import { expandNodeText, expandToken, type Quoting } from "./expansion.ts";
 import { isRedirectNode } from "./redirects.ts";
 import { matchesReadOnlyPrefix } from "./readonly-commands.ts";
 import type { Direction, PathTarget } from "../types.ts";
@@ -13,6 +13,7 @@ import type { Direction, PathTarget } from "../types.ts";
  *
  * | 条件 | 是否路径候选 | 方向 |
  * |---|---|---|
+ * | 参数形如 `--opt=value` 且 value 像路径（`git diff --output=.env`） | 是 | 同命令 |
  * | 命令命中外置只读白名单 | 全部非选项参数 | read |
  * | 参数看起来像路径（含分隔符、`~`、`.`/`..` 开头、盘符） | 是 | 命令非只读时按 write |
  * | 参数里出现变量/替换（`"$DIR"`、`$(...)`） | 仅当它同时像路径 | 同上 |
@@ -62,6 +63,8 @@ export interface CommandArgAnalysis {
   paths: PathTarget[];
   /** 参数中存在无法静态确定的取值。 */
   dynamic: boolean;
+  /** 参数里出现带路径值的 `--opt=value`（可能是写文件的选项，见 isReadOnlyUnit）。 */
+  pathValuedOption: boolean;
 }
 
 export interface CommandArgOptions {
@@ -110,8 +113,39 @@ export function analyzeCommandArgs(
 
   const paths: PathTarget[] = [];
   let dynamic = false;
+  // 带路径值的 `--opt=value`：可能是写文件的选项（`git diff --output=.env`），
+  // 会让"命中外置白名单"不再足以免评审。
+  let pathValuedOption = false;
   for (const [index, child] of argumentNodes.entries()) {
-    if (index < consumedWords || isOptionLike(child)) {
+    if (index < consumedWords) {
+      continue;
+    }
+    if (isOptionLike(child)) {
+      // `--output=.env`：值嵌在选项里。只看值形态（通用规则，不为具体选项开分支），
+      // 否则 `git diff --output=.env` 这类调用既不产出路径对象，又会被白名单当只读放行。
+      const embedded = embeddedOptionValue(child.text);
+      const value =
+        embedded === undefined
+          ? undefined
+          : expandToken(embedded.text, {
+              home: options.home,
+              cwd: options.cwd,
+              quoting: embedded.quoting,
+            });
+      if (value === undefined) {
+        continue;
+      }
+      dynamic = dynamic || value.dynamic;
+      if (value.text.length > 0 && looksLikePath(value.text)) {
+        pathValuedOption = true;
+        paths.push(
+          makePathTarget(value.text, direction, "arg", {
+            cwd: options.cwd,
+            platform: options.platform,
+            roots: options.roots,
+          }),
+        );
+      }
       continue;
     }
     const expanded = expandNodeText(child, { home: options.home, cwd: options.cwd });
@@ -131,7 +165,38 @@ export function analyzeCommandArgs(
     );
   }
 
-  return { words, paths, dynamic };
+  return { words, paths, dynamic, pathValuedOption };
+}
+
+/**
+ * 取出 `--opt=value` 里的 value（含引号语义）。
+ *
+ * 从文本切而不从 AST 取：`--output=.env` 在语法树里是**单个 word 节点**，没有子节点可读；
+ * 只有 `--output="$OUT"` 这类才是 `concatenation`。
+ *
+ * 只认带 `=` 的写法：`--output .env` 无法区分"选项的值"与"位置参数"，把位置参数全当路径会
+ * 大量误拦（`grep --color always x`），那种写法留给单元级降级。
+ */
+function embeddedOptionValue(text: string): { text: string; quoting: Quoting } | undefined {
+  const equals = text.indexOf("=");
+  if (equals <= 0) {
+    return undefined;
+  }
+  const value = text.slice(equals + 1);
+  if (value.length === 0) {
+    return undefined;
+  }
+  if (value.length >= 2) {
+    const first = value[0];
+    const last = value[value.length - 1];
+    if (first === "'" && last === "'") {
+      return { text: value.slice(1, -1), quoting: "single" };
+    }
+    if (first === '"' && last === '"') {
+      return { text: value.slice(1, -1), quoting: "double" };
+    }
+  }
+  return { text: value, quoting: "none" };
 }
 
 /** argv 的单词文本：去掉最外层引号。 */

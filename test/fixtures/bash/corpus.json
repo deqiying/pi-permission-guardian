@@ -1,5 +1,4 @@
 {
-  "//": "bash facts 语料断言。键为命令原文；值中字段按 test/facts/bash-corpus.test.ts 的规则比对，缺省字段视为空。",
   "context": {
     "cwd": "/proj/app",
     "platform": "linux",
@@ -769,13 +768,229 @@
       ]
     },
     "(()": {
-      "units": [],
-      "unresolved": "parse-error"
+      "units": [
+        "(()"
+      ],
+      "unresolved": "parse-error",
+      "unresolvedUnits": [
+        0
+      ]
     },
     "if true": {
-      "units": [],
-      "unresolved": "parse-error"
+      "units": [
+        "if true"
+      ],
+      "unresolved": "parse-error",
+      "unresolvedUnits": [
+        0
+      ]
     },
+    "> .env": {
+      "units": [
+        "> .env"
+      ],
+      "paths": [
+        "write:.env"
+      ]
+    },
+    "2> err.log": {
+      "units": [
+        "2> err.log"
+      ],
+      "paths": [
+        "write:err.log"
+      ]
+    },
+    "&> all.log": {
+      "units": [
+        "&> all.log"
+      ],
+      "paths": [
+        "write:all.log"
+      ]
+    },
+    "2>&1": {
+      "units": []
+    },
+    "cat <<< \"text\"": {
+      "units": [
+        "cat"
+      ],
+      "readOnly": [
+        0
+      ]
+    },
+    "cat < \"$IN\"": {
+      "units": [
+        "cat"
+      ],
+      "unresolved": "dynamic-path",
+      "unresolvedUnits": [
+        0
+      ],
+      "paths": [
+        "read:$IN"
+      ]
+    },
+    "cat < $IN": {
+      "units": [
+        "cat"
+      ],
+      "unresolved": "dynamic-path",
+      "unresolvedUnits": [
+        0
+      ],
+      "paths": [
+        "read:$IN"
+      ]
+    },
+    "git diff --output=.env": {
+      "units": [
+        "git diff --output=.env"
+      ],
+      "paths": [
+        "read:.env"
+      ]
+    },
+    "git diff --output=\"$OUT\"": {
+      "units": [
+        "git diff --output=\"$OUT\""
+      ],
+      "unresolved": "dynamic-path",
+      "unresolvedUnits": [
+        0
+      ]
+    },
+    "git diff --output='~/x'": {
+      "units": [
+        "git diff --output='~/x'"
+      ],
+      "paths": [
+        "read:~/x"
+      ]
+    },
+    "X=rm; $X -rf /": {
+      "units": [
+        "$X -rf /"
+      ],
+      "unresolved": "dynamic-path",
+      "unresolvedUnits": [
+        0
+      ],
+      "paths": [
+        "write:/"
+      ]
+    },
+    "command rm -rf /": {
+      "units": [
+        "command rm -rf /"
+      ],
+      "unresolved": "indirection-wrapper",
+      "unresolvedUnits": [
+        0
+      ],
+      "wrappers": {
+        "0": "indirection"
+      },
+      "paths": [
+        "write:/"
+      ]
+    },
+    "setsid rm x": {
+      "units": [
+        "setsid rm x"
+      ],
+      "unresolved": "indirection-wrapper",
+      "unresolvedUnits": [
+        0
+      ],
+      "wrappers": {
+        "0": "indirection"
+      }
+    },
+    "stdbuf -o0 rm x": {
+      "units": [
+        "stdbuf -o0 rm x"
+      ],
+      "unresolved": "indirection-wrapper",
+      "unresolvedUnits": [
+        0
+      ],
+      "wrappers": {
+        "0": "indirection"
+      }
+    },
+    "sudo -u root rm x": {
+      "units": [
+        "sudo -u root rm x"
+      ],
+      "unresolved": "indirection-wrapper",
+      "unresolvedUnits": [
+        0
+      ],
+      "wrappers": {
+        "0": "indirection"
+      }
+    },
+    "env FOO=1 rm x": {
+      "units": [
+        "env FOO=1 rm x"
+      ],
+      "unresolved": "indirection-wrapper",
+      "unresolvedUnits": [
+        0
+      ],
+      "wrappers": {
+        "0": "indirection"
+      }
+    },
+    "exec rm x": {
+      "units": [
+        "exec rm x"
+      ],
+      "unresolved": "indirection-wrapper",
+      "unresolvedUnits": [
+        0
+      ],
+      "wrappers": {
+        "0": "indirection"
+      }
+    },
+    "pushd /tmp": {
+      "units": [
+        "pushd /tmp"
+      ],
+      "paths": [
+        "read:/tmp"
+      ]
+    },
+    "popd": {
+      "units": [
+        "popd"
+      ]
+    },
+    "cat ~user/x": {
+      "units": [
+        "cat ~user/x"
+      ],
+      "unresolved": "dynamic-path",
+      "unresolvedUnits": [
+        0
+      ],
+      "paths": [
+        "read:~user/x"
+      ]
+    },
+    "git status --short --branch": {
+      "units": [
+        "git status --short --branch"
+      ],
+      "readOnly": [
+        0
+      ]
+    }
+  },
+  "multiLineCases": {
     "cat <<EOF\n$(rm -rf /)\nEOF\n": {
       "units": [
         "cat",
@@ -810,6 +1025,30 @@
       ],
       "readOnly": [
         0
+      ]
+    },
+    "cat <<'EOF' > .env\nA=1\nEOF\n": {
+      "units": [
+        "cat"
+      ],
+      "paths": [
+        "write:.env"
+      ]
+    },
+    "cat <<EOF > /etc/hosts\nx\nEOF\n": {
+      "units": [
+        "cat"
+      ],
+      "paths": [
+        "write:/etc/hosts"
+      ]
+    },
+    "cat > out.txt <<'EOF'\nx\nEOF\n": {
+      "units": [
+        "cat"
+      ],
+      "paths": [
+        "write:out.txt"
       ]
     }
   }

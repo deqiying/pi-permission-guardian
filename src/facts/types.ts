@@ -26,13 +26,18 @@ export type UnresolvedCause =
   | "dynamic-path"
   /** `<>`：语法上不区分读写，方向不可证（FR-13）。 */
   | "ambiguous-direction"
-  /** 该语言的解析器在 v1 不可用（PowerShell）：整条命令无法静态展开。 */
-  | "unparsed-language";
+  /** 该语言的解析器不存在（PowerShell 在 v1 没有解析器）：整条命令无法静态展开。 */
+  | "unparsed-language"
+  /** 解析器本身不可用（WASM 加载失败）：基础设施故障，与"语言不支持"必须区分。 */
+  | "parser-unavailable";
 
 export type PathSource = "arg" | "redirect" | "tool-input";
 
 export interface PathTarget {
-  /** 原始写法（展开前）。动态路径时它就是唯一可靠信息。 */
+  /**
+   * 已展开、去引号后的字面文本（不再做归一）。审计与语料断言以它为准，
+   * 例如 `cat "$HOME/.x"` 的 `raw` 是 `/home/u/.x` 而不是原文。动态路径时它就是唯一可靠信息。
+   */
   raw: string;
   /**
    * 词法归一形：展开 `~` / `$HOME` / `$PWD`、统一分隔符、折叠 `.` / `..`，

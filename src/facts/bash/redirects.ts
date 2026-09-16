@@ -74,7 +74,7 @@ export function analyzeRedirect(
         ? []
         : [toTarget(analysis.text, "read", options)],
       ambiguous: false,
-      dynamic: false,
+      dynamic,
     };
   }
   if (WRITE_OPERATORS.has(operator)) {
@@ -105,15 +105,30 @@ export function analyzeRedirect(
   };
 }
 
-/** 收集一个节点自身携带的重定向（`command` 与 `redirected_statement` 两种形态都会出现）。 */
-export function collectRedirects(
-  node: SyntaxNode,
-): SyntaxNode[] {
+/**
+ * 收集一个节点携带的重定向。
+ *
+ * 必须递归：`cat <<EOF > .env` 的 `>` 是**嵌在 heredoc_redirect 内部**的（语法树：
+ * `heredoc_redirect → file_redirect`），只看直接子节点会漏掉它，副结果是白名单命令仍然
+ * 被当成只读而免评审放行——而它实际会截断 `.env`。
+ */
+export function collectRedirects(node: SyntaxNode): SyntaxNode[] {
   const redirects: SyntaxNode[] = [];
-  for (const child of node.children) {
-    if (isRedirectNode(child)) {
-      redirects.push(child);
+  const seen = new Set<number>();
+  // 只在重定向节点内部向下走：进入 body / 命令替换会把**内层命令**自己的重定向也算到外层，
+  // 造成同一目标被重复归因。
+  const collect = (current: SyntaxNode): void => {
+    if (!isRedirectNode(current) || seen.has(current.id)) {
+      return;
     }
+    seen.add(current.id);
+    redirects.push(current);
+    for (const child of current.children) {
+      collect(child);
+    }
+  };
+  for (const child of node.children) {
+    collect(child);
   }
   return redirects;
 }

@@ -72,8 +72,11 @@ export const surfaceValueSchema = z
   .meta({ id: "surfaceValue", title: "面规则" });
 
 /**
- * 内置只读命令白名单（FR-9 / D21）：保持尽可能小且通用。
- * 匹配方式固定为"可执行名 + 参数前缀"，不为特定选项增加例外。
+ * 内置只读命令白名单（FR-9 / D21）：保持尽可能小且通用，且条目必须**真的不会写文件**。
+ *
+ * 匹配方式固定为"可执行名 + 参数前缀"，不为特定选项增加例外（D21）。写文件选项的风险由一条
+ * 通用规则兜住：参数里出现带路径值的 `--opt=value`（`git diff --output=.env`）时，该单元的
+ * 免评审资格被取消（见 facts/bash/path-tokens.ts 与 isReadOnlyUnit）。
  */
 export const DEFAULT_READ_ONLY_COMMANDS: readonly string[] = [
   "pwd",

@@ -41,10 +41,11 @@ describe("bash facts：解析器不可用", () => {
   it("不抛异常，返回不可静态展开的保守事实", async () => {
     const facts = await extractFacts("bash", { command: "rm -rf /" }, context);
     expect(facts.parserUsed).toBe("unavailable");
-    expect(facts.unresolved).toBe("unparsed-language");
+    expect(facts.unresolved).toBe("parser-unavailable");
     expect(facts.commands).toHaveLength(1);
     expect(facts.commands[0]?.text).toBe("rm -rf /");
-    expect(facts.commands[0]?.unresolved).toBe("unparsed-language");
+    // 基础设施故障必须与"该语言没有解析器"区分：评审提示词与自检要能说清是哪一种。
+    expect(facts.commands[0]?.unresolved).toBe("parser-unavailable");
     expect(facts.commands[0]?.executable).toBe("rm");
     expect(facts.surfaces).toContain("bash");
   });

@@ -1,4 +1,4 @@
-import type { PathTarget } from "../types.ts";
+import type { PathTarget, UnresolvedCause } from "../types.ts";
 
 /**
  * 只读命令白名单匹配（FR-9）。
@@ -34,18 +34,37 @@ export function matchReadOnlyCommands(
   return undefined;
 }
 
+/** 只读判定的输入。用对象传参是为了让每个条件在调用处都有名字，减少"漏传一个条件"。 */
+export interface ReadOnlyInput {
+  /** 命中的白名单条目；未命中为 undefined。 */
+  matchedEntry: string | undefined;
+  /** 该命令的全部路径目标（参数 + 重定向）。 */
+  paths: readonly PathTarget[];
+  /** 单元的可信性；不可信就不能算只读。 */
+  unresolved?: UnresolvedCause;
+  /** 参数里是否出现带路径值的 `--opt=value`。 */
+  pathValuedOption: boolean;
+}
+
 /**
- * 命令单元是否属于"只读且无写副作用"。
+ * 命令单元是否属于"只读且无写副作用"（FR-9：命中即可免评审放行）。
  *
- * 三个条件缺一不可：命中外置白名单、没有写方向的路径、没有写方向的重定向——
- * 少了后两条，`cat > /etc/hosts` 会因为 `cat` 在白名单里而被直接放行。
+ * 四个条件缺一不可：
+ * 1. 命中外置白名单；
+ * 2. 没有写方向的路径（含重定向）——否则 `cat > /etc/hosts` 会被 `cat` 放行；
+ * 3. 单元本身可信——否则 `cat $f` 会因为"`cat` 是只读的"而放行一个读向未知文件的命令；
+ * 4. 没有带路径值的选项——`git diff --output=.env` 的参数全是"选项"，前缀匹配看不出它要写文件
+ *    （`--output=<file>` 已实测会真实写文件），所以带路径值的选项一律取消免评审资格。
+ *
+ * 第 4 条不关心具体是哪个选项（D21 禁止为特殊选项开分支），只按形状判断：宁可多取消一次
+ * 免评审，也不要少取消。
  */
-export function isReadOnlyUnit(
-  matchedEntry: string | undefined,
-  paths: readonly PathTarget[],
-): boolean {
-  if (matchedEntry === undefined) {
+export function isReadOnlyUnit(input: ReadOnlyInput): boolean {
+  if (input.matchedEntry === undefined || input.unresolved !== undefined) {
     return false;
   }
-  return paths.every((path) => path.direction === "read");
+  if (input.pathValuedOption) {
+    return false;
+  }
+  return input.paths.every((path) => path.direction === "read");
 }

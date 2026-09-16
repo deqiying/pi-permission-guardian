@@ -39,6 +39,8 @@ let state: ParserState = { kind: "idle" };
 let attempts = 0;
 let lastError: string | undefined;
 let wasmPaths: { treeSitter: string; bash: string } | undefined;
+/** dispose 的代次：用于识别"加载还没完成就被释放"。 */
+let generation = 0;
 
 /**
  * 取得已就绪的解析器；尚未完成初始化时返回 undefined。
@@ -95,6 +97,10 @@ export function bashParserStatus(): BashParserStatus {
 
 /** 释放 WASM 资源（`session_shutdown`）。释放后可再次初始化。 */
 export function disposeBashParser(): void {
+  // 代次递增：万一当前正在加载，加载完成的回调会发现自己的代次已经过期，
+  // 于是直接释放刚建好的资源。否则 `/perm reload` 后立即退出会"释放后又变就绪"，
+  // 等于没释放。
+  generation += 1;
   if (state.kind === "ready") {
     state.handle.parser.delete();
   }
@@ -107,6 +113,7 @@ export function parseBashWith(handle: BashParserHandle, text: string): Tree | un
 }
 
 async function loadParser(): Promise<BashParserHandle> {
+  const startedAt = generation;
   try {
     const require = createRequire(import.meta.url);
     const treeSitterWasm = require.resolve("web-tree-sitter/web-tree-sitter.wasm");
@@ -121,6 +128,11 @@ async function loadParser(): Promise<BashParserHandle> {
     parser.setLanguage(language);
 
     const handle: BashParserHandle = { parser, language };
+    if (startedAt !== generation) {
+      // 加载期间被 dispose：不复活，直接释放。
+      parser.delete();
+      throw new Error("解析器在加载期间被释放");
+    }
     state = { kind: "ready", handle };
     lastError = undefined;
     return handle;

@@ -252,6 +252,9 @@ agent 读取 `~/.pi/agent/` 下的会话文件，或写入 `../other-project/` �
 | v1 没有 PowerShell 解析器 | `powershell` 命令整体标记 `unparsed-language`，因此 PowerShell 规则最多产生 `review` / `ask`，不会单独给出 `allow` / `deny`（fail-closed） |
 | `~user/x`、`${VAR:-default}`、`$((…))` 等取值不在需求可展开范围内 | 保持字面并标记 `dynamic-path`，不猜值 |
 | 大括号展开 `{a,b}` 与 glob 通配符不做展开 | 按字面文本参与匹配；globs 的目录部分仍可靠，可参与外部目录判定 |
+| `cmd <<'EOF'` 的引号 heredoc 正文是字面数据，不是命令 | 不逐条枚举正文（`cat <<'EOF'` 下 `$(rm -rf /)` 不会被执行）；若正文其实会被执行（`bash <<EOF`），由 opaque 包装器降级兜住 |
+| `> file`（合法但无 body 的重定向语句） | 产出写目标：bash 会真的截断/创建文件，不产出对象就会让写目标对规则不可见 |
+| `--output=.env` 这类“带路径值的选项” | 取消该单元的免评审资格：白名单只看可执行名与参数前缀，看不出某些选项会写文件（已实测 `git diff --output=<file>` 会写） |
 
 ### 8.3 性能预算
 
