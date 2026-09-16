@@ -161,12 +161,12 @@ test/fixtures/bash/*.json
 1. 定义 `Facts`、`CommandUnit`、`PathTarget`、`Direction` 和 `UnresolvedFact` 类型。
 2. 建立工具名到 surface 的映射，覆盖 `bash`、`powershell`、`read`、`write`、`edit`、`find`、`grep`、`ls`、`external_directory` 和未知工具。
 3. 用 `web-tree-sitter` 与 `tree-sitter-bash` 初始化 WASM parser；通过 `createRequire(import.meta.url)` 定位两个 wasm 文件。
-4. 在 `session_start` 预热 parser。初始化失败时保留可重试错误，不把失败缓存为永久成功状态。
+4. 在 `before_agent_start`（首次时）预热 parser，失败时每会话提示一次。初始化失败时保留可重试错误，不把失败缓存为永久成功状态。
 5. 枚举 `&&`、`||`、管道、命令替换、进程替换、子 shell、compound statement、heredoc 和 redirect 中的执行单元。
 6. 对 parse error、动态命令名、不可解析包装器产生 unresolved 标记；不得将已解析部分当作完整事实。
 7. 识别 `sudo`、`xargs`、`bash -c`、`eval` 等间接执行并保守降级。
-8. 对命令和路径执行 `$HOME`、`$PWD`、`~/`、Windows 路径和 MSYS 路径归一化。
-9. 只读命令白名单严格使用“可执行名 + 参数前缀”，内置集合保持最小，不为特定选项增加例外。
+8. 对命令和路径执行 `$HOME`、`$PWD`、`~/`、Windows 路径和 MSYS 形式（`/c/x` → `C:\x`，仅 Windows 目标平台）归一化。
+9. 只读命令白名单严格使用“可执行名 + 参数前缀”，内置集合保持最小，只收**逐个核实过没有写文件选项**的命令（子命令族如 `git diff` 有 `--output=<file>`，不进内置集），不为特定选项增加例外。
 
 ### 测试语料
 
