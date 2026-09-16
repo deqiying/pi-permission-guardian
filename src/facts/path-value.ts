@@ -107,18 +107,33 @@ export function makePathValue(raw: string, options: PathValueOptions): PathValue
   if (!isLiteralPathText(raw)) {
     return { raw, lexical: normalizeSeparators(raw, platform) };
   }
-  const absolute = paths.isAbsolute(raw) ? raw : paths.resolve(cwd, raw);
-  const lexical = normalizeSeparators(paths.normalize(absolute), platform);
-  const canonical = options.resolveSymlinks === false ? undefined : canonicalizeFor(absolute, platform);
+  const lexical = normalizeSeparators(paths.normalize(paths.resolve(cwd, raw)), platform);
+  const canonical =
+    options.resolveSymlinks === false
+      ? undefined
+      : canonicalizeFor(unfoldedAbsolute(cwd, raw, platform), platform);
   return canonical === undefined ? { raw, lexical } : { raw, lexical, canonical };
 }
 
 /**
- * 真实路径：对**未折叠 `..` 的绝对路径**做 realpath。
+ * 拼出"未折叠 `..` 的绝对路径"，专供 realpath 用。
  *
- * 不能在 `normalize` 之后再解析：`cat ./link/../shadow` 的词法形折叠成 `<cwd>/shadow`，
- * 而内核是先解析软链接再处理 `..`，实际打开的是软链接目标旁边的 `shadow`。先折叠会让
- * 真实形与词法形一起错，并且把路径错判成"根目录内"从而绕过外部目录规则（FR-16）。
+ * `path.resolve` / `path.normalize` 会先做词法折叠，而内核是**先解析软链接再处理 `..`**：
+ * `cat ./link/../shadow`（`link` 指向别处）实际打开的是软链接目标旁边的 `shadow`，
+ * 而不是 `<cwd>/shadow`。先折叠会让真实形与词法形一起错，并把路径错判成"根目录内"，
+ * 从而绕过外部目录规则（FR-16）。因此这里只做拼接与分隔符归一，不碰 `..`。
+ */
+function unfoldedAbsolute(cwd: string, raw: string, platform: NodeJS.Platform): string {
+  const paths = pathModule(platform);
+  if (paths.isAbsolute(raw)) {
+    return raw;
+  }
+  const tail = raw.replace(/[\/]+/g, paths.sep);
+  return cwd.endsWith(paths.sep) ? cwd + tail : cwd + paths.sep + tail;
+}
+
+/**
+ * 真实路径：对未折叠的绝对路径做 realpath。
  */
 function canonicalizeFor(absolute: string, platform: NodeJS.Platform): string | undefined {
   if (platform !== process.platform) {
@@ -154,6 +169,10 @@ export function makePathTarget(
  * 有真实形时**只信真实形**：真实形是内核真正打开的位置，词法形只能作为拿不到真实形时的退路。
  * 两侧都拿真实形再比（根目录自己也可能是个软链接，例如 macOS 的 `/tmp → /private/tmp`），
  * 否则"根内 + `..` 穿软链接"的路径会被误判成根内而绕过外部目录规则。
+ *
+ * 相对路径形式的根目录（`../shared-lib`）在这里**不参与匹配**：解析它需要会话 cwd，
+ * 而事实层拿不到会话 cwd（用宿主进程 cwd 解析会得到静默错误的根）。调用方应在组装
+ * FactsContext 时把 `allowRoots` 展开为绝对路径（`~` 用 home、相对路径用会话 cwd）。
  */
 export function isExternal(
   value: PathValue,
@@ -165,10 +184,10 @@ export function isExternal(
   }
   const paths = pathModule(platform);
   for (const root of roots) {
-    const rootLexical = normalizeSeparators(
-      paths.isAbsolute(root) ? paths.normalize(root) : root,
-      platform,
-    );
+    if (!paths.isAbsolute(root)) {
+      continue;
+    }
+    const rootLexical = normalizeSeparators(paths.normalize(root), platform);
     if (value.canonical !== undefined) {
       const rootCanonical = canonicalizeFor(rootLexical, platform);
       if (rootCanonical !== undefined && isUnder(rootCanonical, value.canonical, platform)) {

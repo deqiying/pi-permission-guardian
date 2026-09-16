@@ -74,9 +74,12 @@ export const surfaceValueSchema = z
 /**
  * 内置只读命令白名单（FR-9 / D21）：保持尽可能小且通用，且条目必须**真的不会写文件**。
  *
- * 匹配方式固定为"可执行名 + 参数前缀"，不为特定选项增加例外（D21）。写文件选项的风险由一条
- * 通用规则兜住：参数里出现带路径值的 `--opt=value`（`git diff --output=.env`）时，该单元的
- * 免评审资格被取消（见 facts/bash/path-tokens.ts 与 isReadOnlyUnit）。
+ * 匹配方式固定为"可执行名 + 参数前缀"，不为特定选项增加例外（D21），所以"会不会写"只能靠
+ * **人工核实每个条目**，不能靠匹配规则排除选项。因此子命令族不进这个集合：`git diff` /
+ * `git log` / `git show` 都接受写文件的 `--output=<file>`（`--output=<file>` 与
+ * `--output <file>` 两种写法都会真实写文件，已实测），而值可以是任意文件名，
+ * 前缀匹配与"带路径值的选项"规则都看不出它要写文件。需要它们时请在 `permission.bash`
+ * 里显式配 allow，并自行承担该命令全部选项的风险。
  */
 export const DEFAULT_READ_ONLY_COMMANDS: readonly string[] = [
   "pwd",
@@ -86,9 +89,6 @@ export const DEFAULT_READ_ONLY_COMMANDS: readonly string[] = [
   "tail",
   "wc",
   "git status",
-  "git diff",
-  "git log",
-  "git show",
 ];
 
 const auditLogSchema = z
@@ -280,7 +280,7 @@ const workingDirectorySchema = z.strictObject({
     .default([...DEFAULT_READ_ONLY_COMMANDS])
     .meta({
       description:
-        '只读命令白名单（FR-9）：命中即 allow，不产生评审调用。内置集保持尽可能小且通用，匹配固定为“可执行名 + 参数前缀”，不为特殊选项增加分支。省略时使用内置集；显式配置数组时完整覆盖默认集，配置 [] 可关闭。例如 "git status" 匹配 `git status --short`，不匹配 `git push`。',
+        '只读命令白名单（FR-9）：命中即 allow，不产生评审调用。内置集保持尽可能小且通用，匹配固定为“可执行名 + 参数前缀”，不为特殊选项增加分支，因此只能加入**已核实不会写文件**的命令（子命令族不要加：`git diff` 之类有 --output=<file> 这类写文件选项）。省略时使用内置集；显式配置数组时完整覆盖默认集，配置 [] 可关闭。例如 "git status" 匹配 `git status --short`，不匹配 `git push`。带路径值的 --opt=value 选项会取消该次调用的免评审资格。',
     }),
 });
 

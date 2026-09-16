@@ -103,3 +103,6 @@ popd
 # 变量展开：`~user` 无法得知家目录
 cat ~user/x
 git status --short --branch
+# 写文件的选项 + 非路径形态的值：白名单看不出它会写，只能靠"不含写文件选项的命令才进白名单"
+git diff --output=out.txt
+git diff --output out.txt

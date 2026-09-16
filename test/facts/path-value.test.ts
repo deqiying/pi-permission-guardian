@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -127,6 +127,34 @@ describe("path-value：外部目录判定", () => {
 describe("path-value：符号链接", () => {
   const realpathPlatform = process.platform as NodeJS.Platform;
 
+  it("相对路径里的 `..` 穿软链接时，按内核语义解析（不是先折叠）", () => {
+    const dir = tempDir();
+    const root = join(dir, "app");
+    const outside = join(dir, "outside");
+    mkdirSync(root);
+    mkdirSync(outside);
+    symlinkSync(
+      outside,
+      join(root, "link"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    resetPathValueCache();
+
+    const options = { cwd: root, platform: realpathPlatform, roots: [root] };
+    const value = makePathValue("./link/../shadow", options);
+    // 词法形是折叠结果（glob 匹配看到的就是它）。
+    expect(toPosix(value.lexical)).toBe(toPosix(join(root, "shadow")));
+    if (process.platform === "win32") {
+      // 实测：Windows 在打开文件前就**文本折叠** `..`（`link\\..\\probe.txt` 读到的是
+      // `app\\probe.txt`），所以真实形与词法形一致才是"系统真正会打开的位置"。
+      expect(toPosix(value.canonical ?? "")).toBe(toPosix(join(root, "shadow")));
+    } else {
+      // POSIX：先解析软链接再处理 `..` → link 先到 outside，`..` 再回到 <dir>。
+      expect(toPosix(value.canonical ?? "")).toBe(toPosix(join(realpathSync(dir), "shadow")));
+      expect(isExternal(value, [root], realpathPlatform)).toBe(true);
+    }
+  });
+
   it("经由符号链接目录的路径会被解析到真实位置", () => {
     const dir = tempDir();
     const target = join(dir, "real");
@@ -142,6 +170,31 @@ describe("path-value：符号链接", () => {
 
     // 通过链接访问真实目录内的文件：真实形在根内 → 不算外部。
     expect(isExternal(value, [target], realpathPlatform)).toBe(false);
+  });
+
+  it("根目录自身是软链接时，两侧都取真实形比较", () => {
+    const dir = tempDir();
+    const realRoot = join(dir, "realroot");
+    mkdirSync(realRoot);
+    const linkedRoot = join(dir, "rootlink");
+    symlinkSync(
+      realRoot,
+      linkedRoot,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    resetPathValueCache();
+
+    // 经由软链接根目录访问的文件仍算"根内"：只比较词法形/真实形任一侧都会误判。
+    const value = makePathValue(join(linkedRoot, "y.txt"), {
+      cwd: linkedRoot,
+      platform: realpathPlatform,
+    });
+    expect(isExternal(value, [linkedRoot], realpathPlatform)).toBe(false);
+  });
+
+  it("相对形式的根目录不参与匹配（事实层拿不到会话 cwd，宁可判为外部）", () => {
+    const value = makePathValue("./x", LINUX);
+    expect(isExternal(value, ["../shared-lib"], "linux")).toBe(true);
   });
 
   it("写操作目标不存在时，解析到已存在的父目录", () => {

@@ -139,10 +139,11 @@ describe("配置 schema（FR-57/58）", () => {
       "tail",
       "wc",
       "git status",
-      "git diff",
-      "git log",
-      "git show",
     ]);
+    // 子命令族不进内置集：`git diff` / `git log` / `git show` 都接受写文件的 `--output=<file>`
+    // （实测 `--output=<file>` 与 `--output <file>` 两种写法都会真实写文件），而白名单匹配
+    // 固定为"可执行名 + 参数前缀"（D21 不为选项开分支），值又可以是任意文件名 ——
+    // 前缀匹配与"带路径值的选项"规则都看不出它要写文件，一旦放进内置集就是免评审放行。
     expect(config.enabled).toBe(true);
     expect(config.gate).toBe("side-effect");
     expect(config.onReviewUnavailable).toBe("deny");
