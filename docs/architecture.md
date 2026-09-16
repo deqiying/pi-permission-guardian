@@ -152,11 +152,13 @@ interface GuardianRuntime {
   gateOverride?: Gate;           // 会话级覆盖面覆盖（"side-effect" | "all"）
   config: ResolvedConfig;        // 当前生效配置（含 baseline 合成结果）
   configVersion: number;         // 并入缓存 key（FR-31）
+  authorizationVersion: string;  // 用户消息文本指纹（FR-33）；变化即清空授权与缓存
   grants: SessionGrants;         // 会话授权记忆
-  cache: DecisionCache;
-  breaker: BreakerState;
+  cache: DecisionCache;          // 判定缓存（仅内存，仅评审结论）
+  breaker: BreakerState;         // 熔断器（每轮重置）
   callIndex: number;             // 单调递增的调用序号（供预评分滞后判定）
-  classifier: ClassifierState;
+  classifier: ClassifierState;   // 预评分（默认关闭）
+  lastDecision?: LastDecision;   // 最近一次决策，供状态栏显示来源（FR-41）
   // 子会话 ID registry 在 extension/subagents.ts 的进程级状态中，不放进会话 runtime
   isSubagentSession: boolean;
 }
@@ -166,7 +168,8 @@ interface GuardianRuntime {
 |---|---|
 | 扩展工厂（同步） | 注册 flag、命令、事件；构造 runtime（此时 **不读配置**，因为 `ctx` 不可用） |
 | `session_start` | 读配置、重置 runtime、按 `--perm` flag 决定是否 engaged、更新状态栏 |
-| `before_agent_start` | 重新读配置（支持热改）、预热 tree-sitter（失败每会话提示一次）、检测模型变化是否影响评审可用性、更新状态栏 |
+| `before_agent_start` | 用本轮 prompt 更新用户授权版本（FR-33）；重新读配置（支持热改）、预热 tree-sitter（失败每会话提示一次）、更新状态栏 |
+| `message_end` | role=user 的消息同样更新用户授权版本（捕获 steer / followUp） |
 | `turn_start` | 重置熔断器 |
 | `tool_call` | 决策管线（见 §4） |
 | `user_bash` | 用户直接执行命令的决策入口（见 §4.0.1） |
@@ -182,6 +185,8 @@ interface GuardianRuntime {
 tool_call(event, ctx)
  │
  ├─ engaged? ──否──► return undefined
+ │
+ ├─ 0. 熔断已触发？（本轮）──是──► { block: true, terminate: true, reason }（本轮提前结束）
  │
  ├─ 1. classify(toolName) ─► surfaces[]        (bash | read | write | tool | ...)
  │
@@ -202,11 +207,14 @@ tool_call(event, ctx)
  │        ──► onMixedCommandActions（默认 deny）
  │      未触发混合冲突 ──► 所有对象取最严格者
  │
- ├─ 5. 会话授权记忆查询（仅当 facts 无 unresolved 且没有任何对象 deny）
+ ├─ 5. 会话授权记忆查询（仅当 facts 无 unresolved、没有任何对象 deny、且该工具本轮未被 deny）
  │      hit ──► 把 ask / review 放宽为 allow（来源=session-grant，不写缓存）
  │
- ├─ 6. 缓存查询（仅当 facts 无 unresolved）
- │      hit ──► 复用结论（来源=cache）
+ ├─ 6. 判定缓存查询（同上前置条件 + `cache.enabled` + `ttlMs > 0`）
+ │      hit ──► 复用结论（来源=cache；只存评审模型给出的 allow / deny）
+ │
+ ├─ 6.5 非阻塞预评分快路径（`classifier.enabled` 且未滞后 / 授权版本一致 / 该工具本轮未被 deny）
+ │      hit ──► allow（来源=classifier；只放行、不拒绝，也不喂熔断器）
  │
  ├─ 7. 按 action 分派
  │      allow  ──► 放行
@@ -216,6 +224,7 @@ tool_call(event, ctx)
  │
  ├─ 8. 人工确认（ask 或 review 升级而来）
  │      hasUI=false ──► onAskWithoutUI（默认 deny）
+ │      对话框展示四要素：待执行动作 / 命中规则 / 风险点 / 建议动作（FR-42）
  │      选择结果 ──► 仅此次 / 会话授权（仅人工）/ 拒绝 / 拒绝并说明
  │
  ├─ 9. 出结论：allow ──► undefined
@@ -225,10 +234,14 @@ tool_call(event, ctx)
  └─ 10. 后置（不阻塞返回值）
         ├─ 审计日志写盘
         ├─ appendEntry
-        ├─ 更新熔断器计数
-        ├─ 写入缓存（仅确定结论）
-        └─ 更新状态栏
+        ├─ 更新熔断器计数（达到阈值时给这次 deny 补上 `terminate`）
+        ├─ 写入缓存（仅评审模型给出的确定结论）
+        └─ 更新状态栏（模式 + 最近一次决策来源）
 ```
+
+**FR-35 的快路径封锁**：同一轮内被 `deny` 过的工具跳过第 5 / 6 / 6.5 步，强制回到规则与评审路径。
+同轮重试同一条命令，其形态最接近"换个写法绕过"。评审层内部的证据工具是进程内直接调用，
+不经过本管线，因此不会被自己的熔断器误伤。
 
 **授权查询在第 5 步（规则求值之后）而不是之前**：授权是"人工确认过的等价 intent 可以跳过复查"，
 它只能把规则层得出的 `ask` / `review` 放宽为 `allow`，**永不覆盖 `deny`**；`facts` 带 `unresolved`
@@ -793,6 +806,7 @@ key = sha256([
 ```
 
 - **仅缓存确定结论**（allow / deny）。`unavailable` 不入缓存（FR-32）——否则一次网络抖动会在 TTL 内固化成"这条路永远超时"。
+- **只有评审模型的结论入缓存**：它是唯一昂贵且可复现的判定。规则层结论是纯内存计算，缓存它只是白占内存；`ask`、人工的临时决定与预评分放行要么不构成安全结论，要么带一次性意图。
 - `authorizationVersion` 的作用：用户追加了新的指令（"顺便把日志目录也清了"）会改变授权前提，此前的判定必须失效。指纹用低成本算法（消息文本长度 + FNV-1a hash）即可，目的是变更检测而非抗碰撞。
 - facts 带 `unresolved` 时**跳过缓存**：无法稳定复现的目标不应被复用。
 - 仅内存，TTL 默认 5 分钟。
@@ -878,6 +892,7 @@ key = sha256([
 ```
 
 - 落盘为 JSONL，权限 0600，按进程本地日期切分为 `guardian-YYYY-MM-DD.jsonl`。
+- `source` 是"谁批准的"（G5），取值固定为 `policy`（名单 / 规则 / 默认矩阵 / 失败分支）/ `reviewer` / `cache` / `session-grant` / `human` / `circuit-breaker` / `classifier`。来源为 `cache` 时，理由文本里会带上原判定来源，避免丢掉"第一手依据"。
 - `model` / `verdict` / `evidenceRounds` 描述评审事实：`verdict` 取值 `allow` / `deny` / `unavailable`，`unavailable` 表示评审未完成而不是“因风险被拒”（FR-19/25/27）；未经过评审的调用这三个字段为空。
 - 默认保留 14 个自然日，`auditLog.retentionDays` 可配置；启动和跨日首次写入前清理更早文件，清理失败只告警。
 - `write` / `edit` 的 `content` 只记 `{length, sha256}`；命中敏感路径规则时不记录内容（FR-44）。
