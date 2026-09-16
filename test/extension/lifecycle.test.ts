@@ -304,17 +304,35 @@ describe("会话生命周期与 /perm 命令面（M1）", () => {
     expect(statusBar(ctx)).toBeUndefined();
   });
 
-  it("未接入的入口保持惰性，不产生副作用", async () => {
+  it("tool_call 进入决策管线（M3）", async () => {
+    const harness = setup();
+    writeGlobalConfig(
+      harness.workspace,
+      JSON.stringify({ permission: { bash: { "rm -rf /": "deny" } } }),
+    );
+    const ctx = await startSession(harness);
+
+    const blocked = await harness.pi.fire(
+      "tool_call",
+      { type: "tool_call", toolName: "bash", toolCallId: "c1", input: { command: "rm -rf /" } },
+      ctx,
+    );
+    expect(blocked).toMatchObject({ block: true });
+
+    const allowed = await harness.pi.fire(
+      "tool_call",
+      { type: "tool_call", toolName: "read", toolCallId: "c2", input: { path: "a.txt" } },
+      ctx,
+    );
+    expect(allowed).toBeUndefined();
+  });
+
+  it("尚未接入的入口保持惰性，不产生副作用", async () => {
     const harness = setup();
     writeGlobalConfig(harness.workspace, REFERENCE_LIKE);
     const ctx = await startSession(harness);
 
-    for (const event of [
-      "turn_start",
-      "tool_call",
-      "tool_result",
-      "user_bash",
-    ] as const) {
+    for (const event of ["turn_start", "tool_result", "user_bash"] as const) {
       await expect(harness.pi.fire(event, {}, ctx)).resolves.toBeUndefined();
     }
   });

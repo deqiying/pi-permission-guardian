@@ -5,6 +5,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 import { AuditLogger } from "../audit/logger.ts";
+import { createDecisionEngine } from "../decision/pipeline.ts";
 import { createCommandHandler } from "./commands.ts";
 import { createSessionController } from "./startup.ts";
 import { createRuntime, type GuardianRuntime } from "./state.ts";
@@ -29,7 +30,7 @@ export interface GuardianDeps {
   warn?: (message: string) => void;
 }
 
-/** 尚未接入决策的入口：M5 接入熔断器重置，M3/M4 接入 tool_call 与 user_bash。 */
+/** 尚未接入决策的入口：M5 接入熔断器重置，M4 接入 user_bash。 */
 const inertHandler = (_event: unknown, _ctx: ExtensionContext): undefined =>
   undefined;
 
@@ -60,6 +61,13 @@ export function registerGuardian(
     warn: deps.warn,
   });
 
+  const engine = createDecisionEngine({
+    pi,
+    runtime,
+    audit,
+    warn: deps.warn,
+  });
+
   const commandHandler = createCommandHandler({
     runtime,
     audit,
@@ -73,9 +81,9 @@ export function registerGuardian(
 
   pi.on("session_start", (_event, ctx) => controller.sessionStart(ctx));
   pi.on("before_agent_start", (_event, ctx) => controller.beforeAgentStart(ctx));
-  // M5 接入熔断器重置；M3/M4 接入 tool_call 与 user_bash 决策入口。
+  // M5 接入熔断器重置；M4 接入 user_bash 决策入口。
   pi.on("turn_start", inertHandler);
-  pi.on("tool_call", inertHandler);
+  pi.on("tool_call", (event, ctx) => engine.handleToolCall(event, ctx));
   pi.on("tool_result", inertHandler);
   pi.on("user_bash", inertHandler);
   pi.on("session_shutdown", (_event, ctx) => controller.sessionShutdown(ctx));

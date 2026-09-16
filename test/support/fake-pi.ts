@@ -16,6 +16,8 @@ export interface FakePi {
   handlers: Map<string, RecordedHandler[]>;
   commands: Map<string, CommandOptions>;
   flags: Map<string, FlagOptions>;
+  /** `pi.appendEntry` 收到的会话内记录（FR-45）。 */
+  entries: Array<{ customType: string; data: unknown }>;
   eventCalls: Array<{
     event: string;
     payload: unknown;
@@ -37,11 +39,13 @@ export function createFakePi(): ExtensionAPI & FakePi {
   const flags = new Map<string, FlagOptions>();
   const flagValues = new Map<string, boolean | string | undefined>();
   const eventCalls: FakePi["eventCalls"] = [];
+  const entries: FakePi["entries"] = [];
 
   const fake = {
     handlers,
     commands,
     flags,
+    entries,
     eventCalls,
     async fire(
       event: string,
@@ -93,6 +97,9 @@ export function createFakePi(): ExtensionAPI & FakePi {
     },
     getFlag(name: string): boolean | string | undefined {
       return flagValues.get(name);
+    },
+    appendEntry(customType: string, data?: unknown): void {
+      entries.push({ customType, data });
     },
   };
 
