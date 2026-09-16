@@ -215,8 +215,8 @@ src/interact/dialog.ts
    层内 last-match-wins、跨层最严格者；**baseline 层只在用户层全未命中时参与**，未识别工具走 `tool` 哨兵 surface。
 3. 每个命令单元或路径对象独立求值，再按调用级规则合并。
 4. 实现固定优先级：`unresolved + trusted deny -> ask`，其次处理 `allow + deny` 的 `onMixedCommandActions`，最后处理普通 `unresolved`。
-5. 会话授权只接受人工对话框确认；模型 allow、缓存、自动审核和用户手输命令本身不能创建 grant。
-6. 建立最小 decision pipeline，按 order 处理 engaged、classify、facts、gate、grant、cache、rule、review、ask 和 outcome。
+5. 会话授权只接受人工对话框确认；模型 allow、缓存、自动审核和用户手输命令本身不能创建 grant。授权在规则求值**之后**参与：只把 `ask` / `review` 放宽为 `allow`，不覆盖 `deny`，`unresolved` 调用不走授权快路径（见 architecture §4/§8.1）。
+6. 建立最小 decision pipeline，按 order 处理 engaged、classify、facts、gate、rule、grant、review、ask 和 outcome（cache 与熔断属 M5，本阶段不预置空壳）。
 7. 为后续评审接入保留窄接口，但本阶段所有 `review` 可先转 `ask`，避免提前耦合模型实现。
 
 ### 验证门禁
@@ -226,7 +226,8 @@ src/interact/dialog.ts
 - **baseline 兑底不得压过用户显式写的 `allow`**：global 层写 `"rm -rf ./dist": "allow"` 时最终必须是 `allow`，而不是默认矩阵的 `review`（baseline 只在用户层全未命中时参与）。
 - `unresolved + deny` 固定为 `ask`，不受 `onUnresolvedFacts` 放宽。
 - 项目层不能放宽全局层的安全底线。
-- 人工会话授权可复用；模型和缓存来源不能创建授权。
+- 人工会话授权可复用；模型和缓存来源不能创建授权；授权不覆盖 `deny`，且 `facts` 带 `unresolved` 时跳过授权。
+- 只读白名单在未命中用户规则时免评审放行（FR-9）：命令类工具不再额外补工具对象，否则默认矩阵的 `review` 会把它压回评审。
 
 ## 7. M4 评审层与 user_bash
 

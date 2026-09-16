@@ -137,7 +137,7 @@ agent 读取 `~/.pi/agent/` 下的会话文件，或写入 `../other-project/` �
 | 编号 | 需求 | 验收标准 |
 |---|---|---|
 | FR-29 | **会话授权记忆**：只有人工在确认对话框中选择"本会话允许此类"才能创建会话授权，之后等价 intent 直接 `allow`；评审模型 allow、缓存命中、自动审核和用户手输 `!command` 本身都不能创建授权。会话结束清空，不落盘 | 会话内二次调用无弹窗无评审；模型 allow 不产生 grant；`session_shutdown` 后清空 |
-| FR-30 | 授权键由 facts 生成建议模式（如 `rm -rf ./dist` → `rm -rf ./dist*`），并在提示中展示供用户确认 | 建议模式生成有单测 |
+| FR-30 | 授权键由 facts 生成建议模式：取主目标（命令单元文本 / 路径词法形 / 工具名）后追加 glob 的末尾 `" *"`（**不是** `"*"`），如 `rm -rf ./dist` → `rm -rf ./dist *`；并在提示中展示供用户确认。匹配时要求调用里每个动作落在 `ask` / `review` 的对象都被覆盖，且授权只能放宽 `ask` / `review`、不覆盖 `deny` | 建议模式生成有单测；`sh` 建议出的模式不得命中 `shutdown …`；部分覆盖不得放行 |
 | FR-31 | **判定缓存**：key = hash(surface + 规范化目标集合 + 方向 + cwd + 规则集版本 + 用户授权版本 + 评审模型)，命中即复用结论 | 相同 key 二次调用不产生评审；key 任一维度变化即失效 |
 | FR-32 | 缓存只存确定结论（`allow` / `deny`），**不存** `unavailable`；TTL 与容量可配置（默认 300000ms / 200 条），仅内存 | 有用例验证 unavailable 不入缓存 |
 | FR-33 | 缓存与授权记忆的失效必须响应"用户授权前提变化"：以用户消息文本指纹作为授权版本，指纹变化即全部失效 | 用户追加新指令后缓存失效有用例 |
@@ -192,7 +192,7 @@ agent 读取 `~/.pi/agent/` 下的会话文件，或写入 `../other-project/` �
 
 | 编号 | 需求 | 验收标准 |
 |---|---|---|
-| FR-61 | 同一调用中同时存在 `unresolved` facts 和至少一个可信对象明确得到 `deny` 时，最终动作固定为 `ask`；若没有明确 `deny`，仍按 `onUnresolvedFacts` 处理 | 有 `unresolved + deny`、`unresolved + allow/review` 两类测试；前者不得被 `onUnresolvedFacts` 放宽为 `review` |
+| FR-61 | 同一调用中同时存在 `unresolved` facts 和至少一个可信对象明确得到 `deny` 时，最终动作固定为 `ask`；不可静态确定的对象在**未命中用户规则时**按 `onUnresolvedFacts` 处理（对象级：不覆盖已命中的显式规则，也不被默认矩阵架空） | 有 `unresolved + deny`、`unresolved + allow/review` 两类测试；前者不得被 `onUnresolvedFacts` 放宽为 `review`；显式 `permission.powershell = "ask"` 不得被默认 `review` 放宽 |
 | FR-62 | `bash` / `powershell` 规则的模式匹配目标包含**每个命令单元的文本**与**调用级文本**（整条命令、管道、`&&`/`||`/`;` 序列、子 shell、命令替换等容器节点的规范化文本），使 `curl * \| sh` 这类跨单元模式能命中 | 参考配置里的三条管道级模式均有命中测试；引号内的假管道不得产生匹配目标；书写风格（`curl a\|sh` 与 `curl a \| sh`）必须得到同一文本 |
 
 ## 7. 关键设计决策

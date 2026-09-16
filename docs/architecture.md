@@ -87,7 +87,7 @@ pi-permission-guardian/
 │   │   ├── action.ts               # Action 枚举与 restrictiveness 合成
 │   │   ├── glob.ts                 # 模式编译与匹配（FR-4）
 │   │   ├── rules.ts                # 规则表构造（last-match-wins）
-│   │   ├── evaluate.ts             # Facts → RuleOutcome
+│   │   ├── evaluate.ts             # 对象构造、逐对象求值、调用级合成（FR-59/61/62）
 │   │   └── session-grants.ts       # 会话授权记忆（FR-29/30）
 │   ├── review/
 │   │   ├── reviewer.ts             # 模型调用（deadline/abort/失败分类）
@@ -100,7 +100,7 @@ pi-permission-guardian/
 │   │   ├── cache.ts                # 判定缓存（FR-31~33）
 │   │   ├── breaker.ts              # 熔断器（FR-34/35）
 │   │   ├── policy.ts               # 门槛规则：模型 allow + 高 risk → ask（FR-23）
-│   │   └── outcome.ts              # GateOutcome 与理由文本生成（FR-26/27）
+│   │   └── outcome.ts              # DecisionOutcome 与理由文本生成（FR-26）
 │   ├── interact/
 │   │   └── dialog.ts               # 人工确认对话框（FR-42）
 │   └── audit/
@@ -120,6 +120,8 @@ pi-permission-guardian/
     │   ├── bash-corpus.test.ts      # 语料：单元/路径/方向/wrapper/unresolved
     │   └── extract-degraded.test.ts # 解析器不可用时的降级
     ├── audit/                      # 日志落盘、脱敏、轮转
+    ├── policy/                     # glob、规则求值、会话授权（纯函数）
+    ├── decision/                   # 决策管线（假 UI / 真实 facts）
     ├── extension/                  # 生命周期与命令面（假 ExtensionAPI）
     └── fixtures/
         └── bash/                   # 语料 corpus.txt + 期望 corpus.json
@@ -186,21 +188,22 @@ tool_call(event, ctx)
  │      side-effect（默认）：pi 内置工具（bash/powershell/read/write/edit/find/grep/ls）
  │      all：额外包含自定义工具与 MCP 工具
  │      未覆盖 ──► return undefined
- │      ※ 评估本身只是内存 glob 匹配，成本可忽略；真正贵的是第 7 步的评审调用，
- │        它由默认动作矩阵控制（读取类默认 allow，不进评审）
+ │      ※ 评估本身只是内存 glob 匹配，成本可忽略；真正贵的是第 7 步分派出的 review 分支
+ │        （评审调用），它由默认动作矩阵控制（读取类默认 allow，不进评审）
  │
- ├─ 4. 会话授权记忆查询
- │      hit ──► allow（来源=session-grant，不写缓存）
- │
- ├─ 5. 缓存查询（仅当 facts 无 unresolved）
- │      hit ──► 复用结论（来源=cache）
- │
- ├─ 6. 规则求值 evaluate(facts) ─► 各对象的 action
- │      未命中 ──► defaultAction（按 surface 矩阵，默认 read→allow / 其余→review）
+ ├─ 4. 规则求值 evaluate(facts) ─► 各对象的 action
+ │      用户规则未命中时：只读白名单 ──► allow（FR-9）；
+ │        不可静态确定的对象 ──► onUnresolvedFacts；其余 ──► defaultAction（surface 矩阵）
  │      若存在 unresolved 且至少一个可信对象明确 deny ──► ask
  │      多个已解析命令单元同时得到 allow 与 deny
  │        ──► onMixedCommandActions（默认 deny）
  │      未触发混合冲突 ──► 所有对象取最严格者
+ │
+ ├─ 5. 会话授权记忆查询（仅当 facts 无 unresolved 且没有任何对象 deny）
+ │      hit ──► 把 ask / review 放宽为 allow（来源=session-grant，不写缓存）
+ │
+ ├─ 6. 缓存查询（仅当 facts 无 unresolved）
+ │      hit ──► 复用结论（来源=cache）
  │
  ├─ 7. 按 action 分派
  │      allow  ──► 放行
@@ -223,6 +226,12 @@ tool_call(event, ctx)
         ├─ 写入缓存（仅确定结论）
         └─ 更新状态栏
 ```
+
+**授权查询在第 5 步（规则求值之后）而不是之前**：授权是"人工确认过的等价 intent 可以跳过复查"，
+它只能把规则层得出的 `ask` / `review` 放宽为 `allow`，**永不覆盖 `deny`**；`facts` 带 `unresolved`
+时同样跳过（与缓存同一条理由：无法稳定复现的目标不该走快路径）。把授权放在规则之前的话，
+配置收紧（`/perm reload`）后旧的授权会成为绕过新 `deny` 的路径。判据是"调用里每个动作落在
+`ask` / `review` 的对象都被某条授权模式覆盖"，所以部分覆盖得不到放行。
 
 ### 4.0 gate 的含义
 
@@ -270,11 +279,14 @@ gate 决定"哪些工具调用进入规则求值"，**不是**"哪些调用会�
 
 同一 surface 内可能有**多条**规则命中（多命令单元、多个路径各自命中）。规则：
 
-1. 每个被裁决对象（命令单元 / 路径）**独立**求值，取各自命中的最严动作。
-2. 如果存在 `unresolved` facts，且至少一个可信对象明确得到 `deny`，整个调用固定为 `ask`（FR-61）。
-3. 没有上述组合时，如果同一 shell 调用的多个命令单元中同时存在裁决结果为 `allow` 和 `deny` 的单元，则整个调用的动作改为 `onMixedCommandActions`（默认 `deny`，可配置 `ask` / `review` / `deny`）。
-4. 未触发上述冲突时，整个调用的最终动作 = 所有对象动作的**最严格者**。
-5. 只要有任意对象是 `unresolved` 且没有明确 `deny`，整个调用走 `onUnresolvedFacts`。
+1. 每个被裁决对象（命令单元 / 路径 / 工具）**独立**求值，取各自命中的最严动作（对象级优先顺序见 §4.3）。
+2. **不可静态确定**的对象在未命中用户规则时，动作是 `onUnresolvedFacts`（它取代默认矩阵，而不是取代整个调用的结果）。
+   这一点必须是对象级的：PowerShell 的每个命令单元都是 `unresolved`，若在调用级用 `onUnresolvedFacts` 覆盖已求值结果，
+   显式写的 `permission.powershell = "ask"` 会被默认的 `review` 悄悄放宽；反过来，用 `mostRestrictive` 与默认矩阵合并又会让
+   `onUnresolvedFacts = allow` 完全失效（每条 bash 命令的默认动作都是 `review`）。
+3. 如果存在 `unresolved` 对象，且至少一个**可信**对象明确得到 `deny`，整个调用固定为 `ask`（FR-61，不受 `onUnresolvedFacts` 放宽）。
+4. 没有上述组合时，如果同一 shell 调用的多个命令单元中同时存在裁决结果为 `allow` 和 `deny` 的单元，则整个调用的动作改为 `onMixedCommandActions`（默认 `deny`，可配置 `ask` / `review` / `deny`）。
+5. 未触发上述冲突时，整个调用的最终动作 = 所有对象动作的**最严格者**；没有任何对象表态时放行（无事发生）。
 
 对象内部的"never-weaker"原则仍是护栏正确性的核心不变量：
 
@@ -292,6 +304,28 @@ gate 决定"哪些工具调用进入规则求值"，**不是**"哪些调用会�
 | `deny + review` / `deny + ask` / 多个 `deny` | `deny` |
 
 该字段是安全敏感配置：全局层未配置时基线为 `deny`，全局层可以显式设为 `ask` / `review` / `deny`；项目层再按 `deny > ask > review` 与其取最严格者。因此项目配置只能收紧，不能把全局的 `deny` 或默认 `deny` 放宽为 `review` / `ask`。
+
+### 4.3 对象级求值与兜底优先级
+
+一次调用先摊成**被裁决对象**，每个对象再独立求值：
+
+| 对象 | 何时产生 | surface | 匹配目标 |
+|---|---|---|---|
+| 命令单元 | `bash` / `powershell` 的每个命令单元 | 工具面（`bash` / `powershell`） | 单元文本 + 调用级文本（FR-62） |
+| 路径 | 每个路径目标（不论来自命令参数、重定向还是工具输入） | `path_read` / `path_write`，外部路径再追加 `external_directory_*` | 词法形 + 真实形（FR-16） |
+| 工具 | 只有路径类工具的调用 | 工具名；未识别 / 自定义工具再追加 `tool` 哨兵 | 工具名 |
+
+命令类工具**有命令单元时不再补工具对象**：补了会让默认矩阵的 `review` 投出一票，把单元级的只读白名单放行（FR-9）压回评审。反过来，路径类工具必须补工具对象，否则它的工具面规则与默认动作没有投票载体。完全没有对象的调用（空命令、只有注释、`2>&1` 这类描述符复制）直接放行——事实层也刻意不为它们造假对象。
+
+单个对象的求值优先级固定为（这是"用户显式决定 > 事实层免评审 > 默认矩阵"的落点）：
+
+1. 任一**用户层**（global / project）命中 → 取用户层结果；命中即完全屏蔽后面的步骤。
+2. 未命中用户层且该单元命中只读白名单（FR-9）→ `allow`。
+3. 该对象不可静态确定（bash 解析失败 / opaque 包装器 / 动态路径 / PowerShell）→ `onUnresolvedFacts`。
+4. 否则才轮到合成 baseline 兜底（§6.1）。
+5. 都没有 → 不表态，不参与调用级最严格者。
+
+多面组合仍取最严格者：`permission["*"]` 的规则作为一个**独立面**参与投票，因此它与具体面之间也取最严格者（`"*"` 覆盖的是默认矩阵，不是显式写的具体规则）。
 
 ## 5. 事实提取层
 
@@ -467,8 +501,10 @@ interface CompiledRule {
 }
 ```
 
-求值：对每个被裁决对象，按 `(surface, layer, index)` 过滤出候选规则，**先按层合并（最严格），层内取最后一条命中**；
-**baseline 层只在没有任何用户层命中时才参与**（它是兜底层，不是普通一层，见 §6.1）。
+求值：对每个被裁决对象，先取**候选规则**（`rule.surface` 属于该对象的 surface 集合或为 `"*"`，且 matcher 命中任一匹配目标），再
+**按 `(layer, surface)` 分组、每组取最后一条命中**（FR-5 的 last-match-wins），最后在组间取最严格者（FR-6）。
+**baseline 层只在没有任何用户层命中时才参与**（它是兜底层，不是普通一层，见 §6.1）；
+只读白名单（FR-9）与对象级优先顺序见 §4.3。
 
 surface 匹配：`rule.surface === 对象的 surface` 或 `rule.surface === "*"`；
 未识别 / 自定义工具的 surface 用 `tool` 哨兵（同时仍然允许按工具名精确写规则）。
@@ -691,10 +727,18 @@ interface GrantKey {
 }
 ```
 
-- 由 `facts` 生成建议模式：取路径或命令的稳定前缀（如 `rm -rf ./dist` → `rm -rf ./dist*`），使"批准一条命令"与"批准一类命令"的边界对用户可见。
+- 由 `facts` 生成建议模式：取**主目标**（命令单元文本 / 路径词法形 / 工具名）后追加 glob 的末尾
+  `" *"`（**不是** `"*"`），例如 `rm -rf ./dist` → `rm -rf ./dist *`。
+  `*` 在 glob 里是 `.*`，直接追加会把 `sh` 批准成 `shutdown …`、把 `rm -rf ./dist` 批准成 `rm -rf ./distant`；
+  用 FR-4 已定义的"空格 + 参数可选"语义，则既覆盖"同一条命令可带追加参数"，又不跨到同前缀的其他命令。
 - 记忆范围：**本会话**，内存态，`session_shutdown` 清空。
 - 提示中展示建议模式供用户确认，避免"批准一条命令等于批准一整类命令"的隐性授权扩张。
 - **只有人工选择"本会话允许此类"才能创建或更新 grant**。评审模型 allow、缓存、预评分和用户手输 `!command` 本身都不写入授权。
+- **匹配判据**：调用里"动作落在 `ask` / `review`"的每个对象都要被某条授权模式覆盖（`grant.surface === "*"`
+  或等于对象的某个 surface，且模式命中对象的某个匹配目标）。部分覆盖得不到放行，因为
+  `rm -rf ./dist && curl x | sh` 不应因为前半段被批准就整条放行。
+- **授权只在规则求值之后生效**（§4 第 5 步）：它只能把 `ask` / `review` 放宽为 `allow`，永不覆盖 `deny`；
+  `facts` 带 `unresolved` 的调用不享受授权。
 
 ### 8.2 判定缓存（FR-31~33）
 

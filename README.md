@@ -2,7 +2,7 @@
 
 pi agent 的命令执行护栏插件：**黑白名单快速裁决 + 名单外/需复查项交由模型判定**，在高风险操作与跨工作目录读写场景下减少人工介入。斜杠命令为 `/perm`。
 
-> 当前状态：**M1 配置、生命周期与命令面已实现**（配置加载/合并/规范化、`/perm` 命令、会话状态与审计日志）；事实提取与裁决逻辑从 M2 开始。
+> 当前状态：**M3 规则层与最小决策管线已实现**（配置加载/合并/规范化、`/perm` 命令、会话状态与审计日志、tree-sitter 事实提取、glob 规则求值、跨层最严格者合并、会话授权、`tool_call` 端到端裁决）。M3 尚未接入评审模型，`review` 一律转人工确认；评审层从 M4 接入。
 
 ## 核心设计一句话
 
@@ -12,7 +12,7 @@ pi agent 的命令执行护栏插件：**黑白名单快速裁决 + 名单外/�
 
 | 文档 | 内容 |
 |---|---|
-| [docs/requirements.md](docs/requirements.md) | 背景、目标与非目标、用户场景、功能需求（FR-1~FR-61）、设计决策（D1~D25）、约束与已知限制 |
+| [docs/requirements.md](docs/requirements.md) | 背景、目标与非目标、用户场景、功能需求（FR-1~FR-62）、设计决策（D1~D25）、约束与已知限制 |
 | [docs/architecture.md](docs/architecture.md) | 模块划分、决策管线、事实提取、规则引擎、评审器、降本机制、失败语义矩阵、打包与测试策略 |
 | [docs/configuration.md](docs/configuration.md) | 全部配置字段的语义、规则编排顺序、surface 与默认动作矩阵 |
 | [docs/implementation-plan.md](docs/implementation-plan.md) | M0~M7 实施顺序、逐阶段文件范围、测试门禁与完成定义 |
