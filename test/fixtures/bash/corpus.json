@@ -13,7 +13,10 @@
       "head",
       "tail",
       "wc",
-      "git status"
+      "git status",
+      "git diff",
+      "git log",
+      "git show"
     ]
   },
   "cases": {
@@ -639,6 +642,12 @@
     "git diff HEAD~1": {
       "units": [
         "git diff HEAD~1"
+      ],
+      "readOnly": [
+        0
+      ],
+      "paths": [
+        "read:HEAD~1"
       ]
     },
     "npm publish": {
@@ -840,7 +849,7 @@
         "git diff --output=.env"
       ],
       "paths": [
-        "write:.env"
+        "read:.env"
       ]
     },
     "git diff --output=\"$OUT\"": {
@@ -857,7 +866,7 @@
         "git diff --output='~/x'"
       ],
       "paths": [
-        "write:~/x"
+        "read:~/x"
       ]
     },
     "X=rm; $X -rf /": {
@@ -983,11 +992,20 @@
     "git diff --output=out.txt": {
       "units": [
         "git diff --output=out.txt"
+      ],
+      "readOnly": [
+        0
       ]
     },
     "git diff --output out.txt": {
       "units": [
         "git diff --output out.txt"
+      ],
+      "readOnly": [
+        0
+      ],
+      "paths": [
+        "read:out.txt"
       ]
     }
   },

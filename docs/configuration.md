@@ -97,7 +97,7 @@ config 解析失败时 fail-closed：该层的所有 `allow` 抬升为 `review`�
 | `onAskWithoutUI` | `"deny"` | 需要人工确认但没有交互界面：`print` / `json` 模式、无 UI 的子代理会话 |
 | `onMixedCommandActions` | `"deny"` | 同一 shell 调用的多个已解析命令单元中，同时存在裁决结果为 `allow` 与 `deny` 的单元 |
 
-这三个失败开关只接受 `"deny"` / `"ask"` / `"review"`，**不接受 `"allow"`**（D7）：它们描述的都是"本次没能得出安全结论"的情形，允许就地配成 `allow` 等于让"拔网线 / 写错模型名 / 解析不了"成为绕过手段。需要整体放宽时用 `yoloMode`，不要用这些开关。配置里写了 `allow` 会被当作非法值处理（该字段被忽略并落回默认值，同时提示配置失效）。
+这三个失败开关默认 fail-closed（`deny` / `review` / `deny`），但**允许显式配 `"allow"`**（D7）：配成 `allow` 后，评审不可用时直接放行——离线环境确实可能需要这个行为。要清楚这意味着什么：`unavailable` 是基础设施结果，不是安全结论，一旦配成 `allow`，“拔网线 / 配错模型名 / 解析不了”就成了绕过手段。整体放宽护栏时仍推荐 `yoloMode`（会写审计日志并在状态栏显著提示），而不是就地埋一个静默开关。枚举之外的值仍被当作非法值（该字段被忽略并落回默认值，同时提示配置失效）。
 
 `onReviewUnavailable` 默认 `deny` 的理由：`unavailable` 是基础设施结果，不是安全结论。若放行，等于让"拔网线 / 配错模型名"成为绕过手段。
 
@@ -260,15 +260,20 @@ v1 只兼容 `@gotgenes/pi-subagents` v21.7.1。父会话在 `bound` 后未收�
 内置默认集为：
 
 ```text
-pwd, ls, cat, head, tail, wc, git status
+pwd, ls, cat, head, tail, wc, git status, git diff, git log, git show
 ```
 
 内置集保持最小和通用，匹配严格使用“可执行名 + 参数前缀”，不为某个选项额外增加分支。省略 `readOnlyCommands` 时使用内置集；一旦显式配置数组，该数组**完整覆盖**内置集，而不是增量追加。`"readOnlyCommands": []` 可关闭默认白名单。`file`、`stat`、`which`、`whoami`、`date`、`echo`、`rg`、`grep`、`find`、`git branch` 及版本查询等命令不进入内置集，用户可以按项目需要显式加入。
 
 两条护栏限制白名单的免评审范围，配自定义条目时需要知道：
 
-- **只加"已核实不会写文件"的命令，子命令族不要加**：匹配固定为"可执行名 + 参数前缀"，无法排除某个选项会写文件。`git diff` / `git log` / `git show` 都接受 `--output=<file>`（实测 `--output=<file>` 与 `--output <file>` 两种写法都会真实写文件），而值可以是任意文件名，前缀匹配看不出它要写文件 —— 所以它们不在内置集里。若要放行，请在 `permission.bash` 里显式配 `allow` 并自行承担该命令全部选项的风险。
-- **带路径值的选项会取消免评审资格**：参数里出现 `--output=.env` 这种"带 `=` 且值像路径"的选项时，该次调用不算只读。这是通用形状规则（不为具体选项开分支），只覆盖能看出路径形态的写法，不能替代上一条。
+- **带路径值的选项会取消免评审资格**：参数里出现 `--output=.env` 这种"带 `=` 且值像路径"的选项时，该次调用不算只读。这是通用形状规则（不为具体选项开分支）。
+- **残余面**：`git diff --output out.txt`（空格写法）和 `--output=out.txt`（值不像路径）看不出写文件意图，仍会被当作只读免评审。`git diff` / `git log` / `git show` 确实接受会写文件的 `--output=<file>`（实测两种写法都会真实写），保留它们是"对工作目录的只读操作应当免评审"的选择。要封死这个面，在 `permission.bash` 里加一条即可（`*` 跨空格，两种写法都能盖住）：
+
+  ```json
+  { "permission": { "bash": { "git diff --output*": "review" } } }
+  ```
+
 - **解析没读懂的命令不算只读**：解析失败、opaque 包装器（`bash -c`、`eval`）、参数里带无法静态展开的取值时，单元一律不判只读，转而走 `onUnresolvedFacts`（默认 `review`）。
 
 ## 8. 规则表 `permission`

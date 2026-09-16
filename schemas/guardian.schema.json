@@ -65,17 +65,17 @@
     },
     "onReviewUnavailable": {
       "default": "deny",
-      "description": "评审不可用（超时 / 模型报错 / 输出非法 / 模型未配置）时的动作（FR-19、§9）。不允许 allow。",
+      "description": "评审不可用（超时 / 模型报错 / 输出非法 / 模型未配置）时的动作（FR-19、§9）。默认 deny；可显式配 allow。",
       "$ref": "#/$defs/failureBranchAction"
     },
     "onUnresolvedFacts": {
       "default": "review",
-      "description": "facts 不可信（bash 解析失败、包装器内部不可展开、路径非字面量）时的动作（FR-12、FR-14、FR-15）。不允许 allow。",
+      "description": "facts 不可信（bash 解析失败、包装器内部不可展开、路径非字面量）时的动作（FR-12、FR-14、FR-15）。默认 review；可显式配 allow。",
       "$ref": "#/$defs/failureBranchAction"
     },
     "onAskWithoutUI": {
       "default": "deny",
-      "description": "需要人工确认但没有交互界面（print / json 模式、后台子代理）时的动作（FR-46）。不允许 allow。",
+      "description": "需要人工确认但没有交互界面（print / json 模式、后台子代理）时的动作（FR-46）。默认 deny；可显式配 allow。",
       "$ref": "#/$defs/failureBranchAction"
     },
     "onMixedCommandActions": {
@@ -339,7 +339,10 @@
           "head",
           "tail",
           "wc",
-          "git status"
+          "git status",
+          "git diff",
+          "git log",
+          "git show"
         ]
       },
       "type": "object",
@@ -361,9 +364,12 @@
             "head",
             "tail",
             "wc",
-            "git status"
+            "git status",
+            "git diff",
+            "git log",
+            "git show"
           ],
-          "description": "只读命令白名单（FR-9）：命中即 allow，不产生评审调用。内置集保持尽可能小且通用，匹配固定为“可执行名 + 参数前缀”，不为特殊选项增加分支，因此只能加入**已核实不会写文件**的命令（子命令族不要加：`git diff` 之类有 --output=<file> 这类写文件选项）。省略时使用内置集；显式配置数组时完整覆盖默认集，配置 [] 可关闭。例如 \"git status\" 匹配 `git status --short`，不匹配 `git push`。带路径值的 --opt=value 选项会取消该次调用的免评审资格。",
+          "description": "只读命令白名单（FR-9）：命中即 allow，不产生评审调用。内置集保持尽可能小且通用（面向工作目录的只读操作），匹配固定为“可执行名 + 参数前缀”，不为特殊选项增加分支。省略时使用内置集；显式配置数组时完整覆盖默认集，配置 [] 可关闭。例如 \"git status\" 匹配 `git status --short`，不匹配 `git push`。带路径值的 --opt=value 选项会取消该次调用的免评审资格；想连空格写法也封死，可加一条 \"git diff --output*\": \"review\"。",
           "type": "array",
           "items": {
             "type": "string",
@@ -442,10 +448,11 @@
       "enum": [
         "deny",
         "ask",
-        "review"
+        "review",
+        "allow"
       ],
       "title": "失败分支动作",
-      "description": "不允许 allow：失败不能变成放行"
+      "description": "默认 fail-closed；允许显式配 allow（等同就地放宽护栏，请优先考虑 yoloMode）"
     },
     "actionValue": {
       "anyOf": [

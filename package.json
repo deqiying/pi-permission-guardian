@@ -35,6 +35,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "gen:schema": "node --experimental-strip-types scripts/generate-schema.ts",
+    "gen:corpus": "node --experimental-strip-types scripts/gen-bash-corpus.ts",
     "validate:config": "node --experimental-strip-types scripts/validate-config.ts"
   },
   "dependencies": {

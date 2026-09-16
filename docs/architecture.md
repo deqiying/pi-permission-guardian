@@ -408,7 +408,7 @@ parser.setLanguage(await Language.load(bashWasm));
 - **为什么给白名单与写类命令的全部参数**：漏掉它们会直接放过 `cat secrets.pem` 这类敏感文件读取。
 - **为什么不给所有命令的全部参数**：`echo note.env` 会因为命中 `*.env` 而被误拦；未知命令只看"看起来像路径"的词。
 - **带路径值的选项取消免评审资格**：参数里出现带 `=` 且值像路径的选项时，该单元即使命中也**不算只读**（多取消一次免评审，好过少取消一次）。规则只看**形状**，不为具体选项开分支（D21）。
-- **但形状规则替代不了人工核实**：`git diff --output=<file>` 与 `git diff --output <file>` 的**空格写法**、以及值为 `out.txt` 这种不像路径的写法，都看不出写文件意图。因此内置白名单只收**逐个核实过没有写文件选项**的命令，子命令族（`git diff` / `git log` / `git show`）不进内置集；用户自行加入时自行承担该命令全部选项的风险。
+- **但形状规则替代不了人工核实**：`git diff --output <file>` 的空格写法、以及值为 `out.txt` 这种不像路径的写法，都看不出写文件意图。这是**已知残余面**：内置集里的 `git diff` / `git log` / `git show` 确实接受会写文件的 `--output=<file>`，把它们留在集合里是用户决策（对工作目录的只读操作应当免评审）。需要封死的用户在 `permission.bash` 里加一条 `"git diff --output*": "review"` 即可（`*` 跨空格，等号与空格两种写法都能盖住）。
 - **未知命令按 write 归因**：`grep -rn x src/` 里的 `src/` 会被记为写方向，从而可能命中 `path_write` 规则。方向比实际更严格，是 fail-closed 的有意选择；需要精确归因的用户可以把命令写进 `permission.bash` 规则或扩展 `readOnlyCommands`。
 - **opaque 包装器不提取路径**：`bash -c 'rm -rf /'` 的参数是代码文本；`indirection` 包装器的参数仍是真实参数（`sudo rm -rf /tmp/x`），照常提取。
 - **动态路径保持字面**：不把 cwd 拼上去（拼接会造出一个看起来真实的假路径），单元同时标记 `dynamic-path`，由 `onUnresolvedFacts` 兜底。
@@ -490,7 +490,7 @@ interface CompiledRule {
 |---|---|---|
 | `enabled` / `yoloMode` / `auditLog` / `debugLog` | 总开关、逃生舱、日志级别 | `yoloMode=true` 时所有 `ask`/`review` 重写为 `allow`，状态栏必须显著提示（FR-53）；审计日志按日切分并默认保留 14 天 |
 | `gate` / `extraTools` | 评估范围（architecture §4.0） | `side-effect` 覆盖全部 pi 内置工具；自定义/MCP 工具需 `all` 或 `extraTools` |
-| `onReviewUnavailable` / `onUnresolvedFacts` / `onAskWithoutUI` | 三个失败分支的动作（§9） | 默认分别为 `deny` / `review` / `deny`；只能配 `deny` / `ask` / `review`，不接受 `allow`（D7） |
+| `onReviewUnavailable` / `onUnresolvedFacts` / `onAskWithoutUI` | 三个失败分支的动作（§9） | 默认分别为 `deny` / `review` / `deny`；可配 `allow` / `deny` / `ask` / `review`（D7：默认 fail-closed，`allow` 是显式例外） |
 | `onMixedCommandActions` | 同一 shell 调用跨命令单元出现 `allow` / `deny` 冲突时的调用级动作 | 默认 `deny`，可选 `ask` / `review` / `deny`；global/default 定义基线，project 只能收紧 |
 | `reviewer` | 评审模型、deadline、证据循环、风险门槛 | `model` 必填；`maxAllowRiskLevel` 实现 FR-23 |
 | `userBashPolicy` | 用户直接执行 `!command` / `!!command` 的开关、自动审核与模型 | 跨层时 `enabled=true` 和 `autoReview=false` 优先；模型可显式覆盖；deny 使用替代 `BashResult` 阻断 |
@@ -734,6 +734,8 @@ key = sha256([
 | 插件内部异常 | `block` | — | 异常 → 阻断，不让"护栏崩了"等于"放行" |
 
 最后一条特别重要：pi 对 `tool_call` handler 抛错的处理是**阻断该工具**（fail-safe），但我们不应依赖这一行为，而要在管线最外层显式 `try/catch` 并返回带诊断信息的 `{block: true}`。
+
+三个失败分支开关（`onReviewUnavailable` / `onUnresolvedFacts` / `onAskWithoutUI`）默认 fail-closed，但**允许显式配 `allow`**（D7）：用户确实可能需要"评审不可用时放行"（例如离线环境）。它会被当作普通配置值处理并在审计日志里留痕；插件不额外警告。整体放宽护栏时仍推荐用 `yoloMode`（会写审计日志并在状态栏显著提示），而不是就地埋一个静默开关。
 
 ## 10. 观测性
 

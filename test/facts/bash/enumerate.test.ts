@@ -119,6 +119,31 @@ describe("重定向：方向与可信性", () => {
   });
 });
 
+describe("白名单的免评审边界（含用户决策的已知残余面）", () => {
+  const whitelist = ["pwd", "ls", "cat", "git status", "git diff", "git log"];
+  const ctx: FactsContext = { ...context, readOnlyCommands: whitelist };
+
+  it("普通的只读调用免评审", async () => {
+    expect((await units("git diff --stat", ctx))[0]?.readOnly).toBe(true);
+    expect((await units("git log -n 5", ctx))[0]?.readOnly).toBe(true);
+    expect((await units("ls -la", ctx))[0]?.readOnly).toBe(true);
+  });
+
+  it("`--opt=<值像路径>` 取消免评审资格（形状规则）", async () => {
+    const unit = (await units("git diff --output=.env", ctx))[0];
+    expect(unit?.readOnly).toBe(false);
+    expect(unit?.paths).toEqual(["read:.env"]);
+  });
+
+  it("已知残余面：空格写法与不像路径的值仍算只读（用户决策，靠 config 规则封死）", async () => {
+    // 这两个行为是**故意接受**的：`git diff` 留在白名单里，换来"对工作目录的只读操作免评审"。
+    // 需要封死的用户在 permission.bash 里加一条 `"git diff --output*": "review"`。
+    // 如果哪天这个行为变了，请同步改 docs/configuration.md 的残余面说明。
+    expect((await units("git diff --output out.txt", ctx))[0]?.readOnly).toBe(true);
+    expect((await units("git diff --output=out.txt", ctx))[0]?.readOnly).toBe(true);
+  });
+});
+
 describe("枚举：复合语句与包装器", () => {
   it("子 shell 的重定向作用于内部命令", async () => {
     const result = await units("(echo x; rm y) > log.txt");

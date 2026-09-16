@@ -23,16 +23,17 @@ export const actionSchema = z
 /**
  * 失败分支开关允许的动作。
  *
- * 刻意不含 `allow`：`onReviewUnavailable` / `onUnresolvedFacts` / `onAskWithoutUI` 描述的都是
- * "本次没能得出安全结论"的情形，允许配成 `allow` 等于把"拔网线、写错模型名、解析不了" 变成绕过手段。
- * 需要放宽护栏时用 `yoloMode`（它会写审计日志并在状态栏显著提示），而不是就地埋一个静默放行开关。
+ * 默认仍是 fail-closed（`deny` / `review` / `deny`）；`allow` 是**显式许可的例外**：
+ * 用户确实可能希望"评审不可用时放行"（例如离线环境）。默认不这么做，是因为 `unavailable`
+ * 是基础设施结果、不是安全结论，配成 allow 等于把"拔网线 / 写错模型名 / 解析不了"变作绕过手段。
+ * 整体放宽护栏时仍推荐用 `yoloMode`（会写审计日志并在状态栏显著提示），而不是就地埋一个静默开关。
  */
 export const failureBranchActionSchema = z
-  .enum(["deny", "ask", "review"])
+  .enum(["deny", "ask", "review", "allow"])
   .meta({
     id: "failureBranchAction",
     title: "失败分支动作",
-    description: "不允许 allow：失败不能变成放行",
+    description: "默认 fail-closed；允许显式配 allow（等同就地放宽护栏，请优先考虑 yoloMode）",
   });
 
 /** 动作或带理由的动作（FR-10）。 */
@@ -72,14 +73,16 @@ export const surfaceValueSchema = z
   .meta({ id: "surfaceValue", title: "面规则" });
 
 /**
- * 内置只读命令白名单（FR-9 / D21）：保持尽可能小且通用，且条目必须**真的不会写文件**。
+ * 内置只读命令白名单（FR-9 / D21）：保持尽可能小且通用，条目是"面向工作目录的只读操作"。
  *
- * 匹配方式固定为"可执行名 + 参数前缀"，不为特定选项增加例外（D21），所以"会不会写"只能靠
- * **人工核实每个条目**，不能靠匹配规则排除选项。因此子命令族不进这个集合：`git diff` /
- * `git log` / `git show` 都接受写文件的 `--output=<file>`（`--output=<file>` 与
- * `--output <file>` 两种写法都会真实写文件，已实测），而值可以是任意文件名，
- * 前缀匹配与"带路径值的选项"规则都看不出它要写文件。需要它们时请在 `permission.bash`
- * 里显式配 allow，并自行承担该命令全部选项的风险。
+ * 匹配方式固定为"可执行名 + 参数前缀"（D21 不为特定选项开分支），所以写文件选项只能靠两层兜住：
+ *
+ * 1. `--opt=<值像路径>` 这种形状会取消该次调用的免评审资格（`git diff --output=.env`）；
+ * 2. 已知残余面：`git diff --output out.txt`（空格写法）与值不像路径的写法（`--output=out.txt`）
+ *    看不出写文件意图。要更紧的用户在 `permission.bash` 里加一条 `"git diff --output*": "review"` 即可封死。
+ *
+ * `git diff` / `git log` / `git show` 留在集合内是**用户决策**：对工作目录的只读操作应当免评审，
+ * 上面那条残余面由用户在需要时自行收紧（它们确实接受会写文件的 `--output=<file>`，已实测两种写法都会写）。
  */
 export const DEFAULT_READ_ONLY_COMMANDS: readonly string[] = [
   "pwd",
@@ -89,6 +92,9 @@ export const DEFAULT_READ_ONLY_COMMANDS: readonly string[] = [
   "tail",
   "wc",
   "git status",
+  "git diff",
+  "git log",
+  "git show",
 ];
 
 const auditLogSchema = z
@@ -280,7 +286,7 @@ const workingDirectorySchema = z.strictObject({
     .default([...DEFAULT_READ_ONLY_COMMANDS])
     .meta({
       description:
-        '只读命令白名单（FR-9）：命中即 allow，不产生评审调用。内置集保持尽可能小且通用，匹配固定为“可执行名 + 参数前缀”，不为特殊选项增加分支，因此只能加入**已核实不会写文件**的命令（子命令族不要加：`git diff` 之类有 --output=<file> 这类写文件选项）。省略时使用内置集；显式配置数组时完整覆盖默认集，配置 [] 可关闭。例如 "git status" 匹配 `git status --short`，不匹配 `git push`。带路径值的 --opt=value 选项会取消该次调用的免评审资格。',
+        '只读命令白名单（FR-9）：命中即 allow，不产生评审调用。内置集保持尽可能小且通用（面向工作目录的只读操作），匹配固定为“可执行名 + 参数前缀”，不为特殊选项增加分支。省略时使用内置集；显式配置数组时完整覆盖默认集，配置 [] 可关闭。例如 "git status" 匹配 `git status --short`，不匹配 `git push`。带路径值的 --opt=value 选项会取消该次调用的免评审资格；想连空格写法也封死，可加一条 "git diff --output*": "review"。',
     }),
 });
 
@@ -376,19 +382,19 @@ export const guardianConfigSchema = z
       .default("deny")
       .meta({
         description:
-          "评审不可用（超时 / 模型报错 / 输出非法 / 模型未配置）时的动作（FR-19、§9）。不允许 allow。",
+          "评审不可用（超时 / 模型报错 / 输出非法 / 模型未配置）时的动作（FR-19、§9）。默认 deny；可显式配 allow。",
       }),
     onUnresolvedFacts: failureBranchActionSchema
       .default("review")
       .meta({
         description:
-          "facts 不可信（bash 解析失败、包装器内部不可展开、路径非字面量）时的动作（FR-12、FR-14、FR-15）。不允许 allow。",
+          "facts 不可信（bash 解析失败、包装器内部不可展开、路径非字面量）时的动作（FR-12、FR-14、FR-15）。默认 review；可显式配 allow。",
       }),
     onAskWithoutUI: failureBranchActionSchema
       .default("deny")
       .meta({
         description:
-          "需要人工确认但没有交互界面（print / json 模式、后台子代理）时的动作（FR-46）。不允许 allow。",
+          "需要人工确认但没有交互界面（print / json 模式、后台子代理）时的动作（FR-46）。默认 deny；可显式配 allow。",
       }),
     onMixedCommandActions: z
       .enum(["deny", "ask", "review"])

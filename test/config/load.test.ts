@@ -406,13 +406,34 @@ describe("配置加载与合并（FR-47/48/51/52）", () => {
     expect(config.ruleCount).toBe(5);
   });
 
-  it("失败分支开关配成 allow 时该字段被丢弃，落回更严格的默认值", () => {
+  it("失败分支开关配成 allow 时被接受（用户决策：允许显式放宽）", () => {
     const ws = newWorkspace();
     writeGlobalConfig(
       ws,
       JSON.stringify({
         onReviewUnavailable: "allow",
         onUnresolvedFacts: "allow",
+        permission: { bash: { "rm *": "review" } },
+      }),
+    );
+
+    const config = load(ws);
+
+    expect(config.layers.global.status).toBe("loaded");
+    expect(config.onReviewUnavailable).toBe("allow");
+    expect(config.onUnresolvedFacts).toBe("allow");
+    expect(config.degraded).toBe(false);
+    // permission 仍然生效
+    expect(config.ruleCount).toBe(1);
+  });
+
+  it("失败分支开关写成枚举之外的值时该字段被丢弃，落回更严格的默认值", () => {
+    const ws = newWorkspace();
+    writeGlobalConfig(
+      ws,
+      JSON.stringify({
+        onReviewUnavailable: "yolo",
+        onUnresolvedFacts: "maybe",
         permission: { bash: { "rm *": "review" } },
       }),
     );

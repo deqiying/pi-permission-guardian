@@ -82,15 +82,20 @@ describe("配置 schema（FR-57/58）", () => {
     ).toBe(false);
   });
 
-  it("三个失败分支开关不接受 allow：失败不能变成放行", () => {
+  it("失败分支开关接受 allow，但默认仍是 fail-closed（D7）", () => {
     for (const key of [
       "onReviewUnavailable",
       "onUnresolvedFacts",
       "onAskWithoutUI",
     ]) {
-      expect(guardianConfigSchema.safeParse({ [key]: "allow" }).success).toBe(false);
+      // 用户决策：允许显式放宽（离线环境等），默认值不受影响
+      expect(guardianConfigSchema.safeParse({ [key]: "allow" }).success).toBe(true);
       // 更严格的方向仍然可用
       expect(guardianConfigSchema.safeParse({ [key]: "deny" }).success).toBe(true);
+      expect(guardianConfigSchema.safeParse({ [key]: "review" }).success).toBe(true);
+      expect(guardianConfigSchema.safeParse({ [key]: "ask" }).success).toBe(true);
+      // 枚举之外的值依然非法
+      expect(guardianConfigSchema.safeParse({ [key]: "yolo" }).success).toBe(false);
     }
   });
 
@@ -107,7 +112,7 @@ describe("配置 schema（FR-57/58）", () => {
     expect(
       validator.safeParse({ subagentPolicy: { defaultAction: "allow" } }).success,
     ).toBe(false);
-    expect(validator.safeParse({ onReviewUnavailable: "allow" }).success).toBe(
+    expect(validator.safeParse({ onReviewUnavailable: "yolo" }).success).toBe(
       false,
     );
   });
@@ -139,11 +144,13 @@ describe("配置 schema（FR-57/58）", () => {
       "tail",
       "wc",
       "git status",
+      // 用户决策：对工作目录的只读操作应当免评审，即使这些命令存在会写文件的选项
+      // （`git diff --output=<file>`）；形状规则会取消 `--output=<值像路径>` 的免评审资格，
+      // 空格写法/值不像路径的写法是已知残余面，由用户按需加 `"git diff --output*": "review"`。
+      "git diff",
+      "git log",
+      "git show",
     ]);
-    // 子命令族不进内置集：`git diff` / `git log` / `git show` 都接受写文件的 `--output=<file>`
-    // （实测 `--output=<file>` 与 `--output <file>` 两种写法都会真实写文件），而白名单匹配
-    // 固定为"可执行名 + 参数前缀"（D21 不为选项开分支），值又可以是任意文件名 ——
-    // 前缀匹配与"带路径值的选项"规则都看不出它要写文件，一旦放进内置集就是免评审放行。
     expect(config.enabled).toBe(true);
     expect(config.gate).toBe("side-effect");
     expect(config.onReviewUnavailable).toBe("deny");
