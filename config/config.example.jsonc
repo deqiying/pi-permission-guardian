@@ -1,0 +1,281 @@
+// pi-permission-guardian 配置示例（逐字段讲解版，JSONC）
+//
+// 本文件的用途是**读懂字段**：每个字段都带一条说明，取值与默认值一致。
+// 它不是仓库的参考配置 —— 参考配置是 config/config.json（严格 JSON、无注释、规则表完整）。
+// 需要一份能直接用的完整基线，请复制 config/config.json；本文件的规则表只列代表性条目。
+//
+// 输入侧宽容度（FR-49）：手写的配置可以带 // 与 /* */ 注释、对象/数组末尾多余逗号，
+// 字符串字面量里的 "//" 不会被误判为注释。因此本文件去掉注释后即为合法配置，
+// 改名为 config.json 放进下面的目录即可生效。
+//
+// 放置位置（文件名必须是 config.json）：
+//   全局：<agentDir>/extensions/pi-permission-guardian/config.json   —— 始终加载，<agentDir> 默认 ~/.pi/agent
+//   项目：<cwd>/.pi/extensions/pi-permission-guardian/config.json    —— 仅当项目被信任（ctx.isProjectTrusted()）时加载
+//
+// 加载时机：session_start、before_agent_start 各重读一次，因此改配置不必重启会话；也可用 /perm reload 手动触发。
+//
+// 两条裁决规则：跨层（全局 vs 项目）最严格者胜（deny > ask > review > allow）；
+// 同层内后写的规则覆盖先写的（last-match-wins，所以具体规则必须写在宽泛规则之后）。
+//
+// 字段语义与需求依据：docs/configuration.md、docs/requirements.md（FR 编号）。
+{
+  // ---------- 编辑器校验 ----------
+  // $schema：本文件的 schema 位置，编辑器据此补全与实时校验（这是参考配置不带注释的原因：
+  //   活的 schema 比死的注释更有用）。本仓库内的相对路径如下；复制到自己的配置目录后相对路径会失效，
+  //   可改成 "https://raw.githubusercontent.com/deqiying/pi-permission-guardian/main/schemas/guardian.schema.json"。
+  "$schema": "../schemas/guardian.schema.json",
+
+  // ---------- 顶层开关 ----------
+  // enabled：总开关。false 时 tool_call 直接返回，等同未安装；本会话内仍可用 /perm on 或 --perm 重新启用。
+  "enabled": true,
+  // yoloMode：逃生舱。把所有 ask / review 重写为 allow，但护栏继续评估、继续写审计日志，状态栏会显著提示。
+  //   与 enabled:false 的区别：前者"记账但不拦"，排查"某条规则是否命中"时更好用。
+  "yoloMode": false,
+  // auditLog：决策审计日志。固定按 pi 进程本地日期切分，文件名为 guardian-YYYY-MM-DD.jsonl。
+  "auditLog": {
+    // enabled：是否写入 JSONL 审计日志（每条决策的来源为 policy / reviewer / cache / session-grant / human / circuit-breaker）。
+    "enabled": true,
+    // retentionDays：保留的自然日数量（含当天），1~3650。启动及跨日首次写入前清理更早的日志；清理失败只告警。
+    "retentionDays": 14
+  },
+  // debugLog：额外记录 facts 全文与评审提示词。可能含会话内容，默认关闭，只在排查问题时临时打开。
+  "debugLog": false,
+
+  // ---------- 评估范围 ----------
+  // gate：哪些工具调用进入规则求值。side-effect = 全部 pi 内置工具（bash / powershell / read / write / edit /
+  //   find / grep / ls）；all = 额外包含自定义工具与 MCP 工具。
+  //   它决定"是否求值"，不决定"是否拦截"（拦截由规则与默认动作矩阵决定）。
+  //   反例：为省成本把读取类工具排除在外，会让 path 里的 *.env → deny 对 read ./.env 永不生效。
+  "gate": "side-effect",
+  // extraTools：在 gate 之外额外评估的工具名（字符串数组），例如 ["subagent"]。
+  "extraTools": [],
+
+  // ---------- 失败与冲突语义 ----------
+  // 前三个失败开关的共同取值：deny / ask / review / allow，默认落在保守侧。
+  //   配成 allow 等于就地放宽护栏 —— unavailable 是基础设施结果、不是安全结论，
+  //   一旦 allow，"拔网线 / 模型名写错 / 解析不了"就成了绕过手段；整体放宽请优先用 yoloMode。
+  // onReviewUnavailable：评审超时、模型报错、输出无法解析、reviewer.model 未配置时的动作（FR-19）。
+  "onReviewUnavailable": "deny",
+  // onUnresolvedFacts：facts 不可信时的动作 —— bash 解析失败、bash -c / sudo / xargs 等包装器内部不可展开、
+  //   路径非字面量（FR-12/14/15）。注意它不覆盖明确的 deny：同一次调用中既有 unresolved 又有可信的 deny 时固定为 ask（FR-61）。
+  "onUnresolvedFacts": "review",
+  // onAskWithoutUI：需要人工确认但没有交互界面时（print / json 模式、无 UI 的子代理会话）的动作（FR-46）。
+  "onAskWithoutUI": "deny",
+  // onMixedCommandActions：同一次 shell 调用里既有 allow 又有 deny 的命令单元时的调用级动作（FR-59），
+  //   例如 `echo ok && rm -rf /`。只能取 deny / ask / review（不能 allow）；基线由全局层/默认给出，项目层只能收紧。
+  "onMixedCommandActions": "deny",
+
+  // ---------- 评审器 ----------
+  // 未命中名单或命中 review 的调用交给这个模型判断；名单命中即裁决，不产生模型调用。
+  "reviewer": {
+    // model：使用评审即必填，格式 "provider/model-id"，只能引用 pi 模型配置文件里已存在的模型。
+    //   未配置 / 格式非法 / 解析不到都算 unavailable（走 onReviewUnavailable），
+    //   不会回退到当前会话模型 —— 审查独立性要求"被审查者不能用自己批准自己"（D6）。
+    //   请求协议沿用该模型自身的配置，插件不提供 api / baseUrl / 认证 / headers 覆盖项。
+    "model": "deepseek/deepseek-flash",
+    // timeoutMs：单次评审的硬性 deadline，1000~120000 毫秒。
+    "timeoutMs": 20000,
+    // maxEvidenceRounds：评审模型调用只读证据工具自行查证的轮次上限，0~8；0 表示关闭证据循环。
+    "maxEvidenceRounds": 3,
+    // evidenceTools：是否允许评审模型用 read / grep / find / ls 查证（关闭则只能看提示词里的信息）。
+    "evidenceTools": true,
+    // transcript：是否把会话 transcript 提供给评审模型。
+    "transcript": true,
+    // transcriptBudgetChars：transcript 的字符预算上限，最小 2000。
+    "transcriptBudgetChars": 24000,
+    // maxAllowRiskLevel：风险门槛（FR-23），low / medium / high / critical。模型给出 allow 但 riskLevel
+    //   高于此值时不放行而是转为人工确认；调低更严格（更多 allow 转人工），调高更信任模型。
+    //   缺 riskLevel 的 allow 一律按 high 处理，因此默认值下会落到人工确认。
+    "maxAllowRiskLevel": "medium"
+  },
+
+  // ---------- 用户直接执行 !command / !!command ----------
+  // 两者都触发 pi 的 user_bash 事件，安全裁决完全相同，仅 !! 的输出不进模型上下文。
+  "userBashPolicy": {
+    // enabled：是否让用户直接执行的命令经过本插件。任一层配 true 即保持拦截。
+    "enabled": true,
+    // autoReview：裁决为 review 时是否自动调用评审模型；关闭则转人工确认（任一层配 false 即转人工）。
+    "autoReview": true,
+    // model：user_bash 自动审核模型（provider/model-id）；null 表示复用 reviewer.model。
+    "model": null
+  },
+
+  // ---------- 降本机制 ----------
+  // classifier：非阻塞预评分。语义是"先放行、后判定"：在 tool_result 之后异步给轨迹打分，
+  //   低风险时让**下一次**调用直接走快路径。与护栏的保守取向相反，故默认关闭（D8）。
+  "classifier": {
+    // enabled：是否启用。开启后预评分只会放行、永不 deny；评分失败记为 failure 而非"低风险"。
+    "enabled": false,
+    // model：评分模型；null 表示复用 reviewer.model。
+    "model": null,
+    // timeoutMs：单次评分超时，最小 1000 毫秒。
+    "timeoutMs": 15000,
+    // maxLag：评分对应的调用序落后当前序超过此值时快路径失效，0~20（FR-37）。
+    "maxLag": 2
+  },
+  // circuitBreaker：熔断器（FR-34/35）。每轮（turn_start）重置；被 deny 过的工具在同一轮内失去全部快路径。
+  "circuitBreaker": {
+    // consecutiveDenials：同一轮内连续拒绝达到此值时拦截并提前结束本轮，0~100；0 表示关闭该条件。
+    "consecutiveDenials": 3,
+    // recentDenials：窗口内拒绝总数阈值，0~100；0 表示关闭该条件。
+    "recentDenials": 10,
+    // windowSize：上面那个窗口的大小，1~200。
+    "windowSize": 50
+  },
+  // cache：判定缓存（FR-31~33）。仅存在于内存，session_shutdown 时清空；随用户授权版本变化而失效。
+  "cache": {
+    // enabled：是否启用。只缓存确定的 allow / deny，不缓存 unavailable，facts 带 unresolved 时跳过。
+    "enabled": true,
+    // ttlMs：条目存活时间（毫秒），最小 0。
+    "ttlMs": 300000,
+    // maxEntries：容量上限，最小 1。
+    "maxEntries": 200
+  },
+  // sessionGrants：会话授权记忆（FR-29/30）。仅内存、不落盘；只能由人工确认创建。
+  "sessionGrants": {
+    // enabled：是否启用。评审 allow、缓存命中、自动审核、用户手输 !command 都不会写入授权。
+    "enabled": true
+  },
+  // subagentPolicy：子代理会话的保守策略（FR-56），v1 只对接 @gotgenes/pi-subagents v21.7.1。
+  "subagentPolicy": {
+    // enabled：识别到子代理会话时是否启用该策略。任一层配 true 即启用。
+    "enabled": true,
+    // defaultAction：子代理中规则未命中时的默认动作，只能 deny / ask / review（不允许 allow）；
+    //   与实际默认动作矩阵取最严格者，所以只可能收紧，不会放宽父配置里的显式规则。
+    //   yoloMode 不会放宽它产生的 deny —— 要整体放行子代理应改这个字段或关闭 enabled。
+    "defaultAction": "review",
+    // allowSessionGrants：子代理能否创建或使用会话授权。任一层配 false 即禁止；父子会话状态始终不共享。
+    "allowSessionGrants": false
+  },
+
+  // ---------- 工作目录 ----------
+  "workingDirectory": {
+    // allowRoots：视为"内部"的额外根目录。monorepo 里加入兄弟包路径，避免正常读写被判成外部目录访问。
+    //   支持 ~/ 与 $HOME/ 展开，例如 ["../shared-lib", "~/dev/monorepo"]。
+    "allowRoots": [],
+    // readOnlyCommands：只读命令白名单（FR-9），命中即 allow、不产生评审调用。
+    //   匹配方式是"命令单元的可执行名 + 参数前缀"："git status" 匹配 `git status --short`，不匹配 `git push`。
+    //   省略该字段时使用内置集；一旦显式配置数组，该数组**完整覆盖**内置集（不是增量追加，配 [] 即关掉默认白名单）。
+    //   下面显式列出内置集只是为了展示写法：内置集保持最小且通用，按项目需要增删即可。
+    //   两条护栏限制免评审范围：带路径值的 --opt=value 选项会取消该次调用的免评审资格；
+    //   解析没读懂的命令（解析失败、bash -c / eval、参数带无法静态展开的取值）一律不判只读。
+    "readOnlyCommands": [
+      "pwd",
+      "ls",
+      "cat",
+      "head",
+      "tail",
+      "wc",
+      "git status",
+      "git diff",
+      "git log",
+      "git show"
+    ]
+  },
+
+  // ---------- 规则表 permission ----------
+  // 结构：键是 surface，值是动作（字符串）或"模式 → 动作"的映射。
+  // surface 可以是：
+  //   "*"                       通用兜底（**一旦设置会覆盖全部默认值矩阵**，参考配置刻意不设它）
+  //   path / external_directory 语法糖，加载时展开为 path_read+path_write / external_directory_read+external_directory_write
+  //   path_read / path_write / external_directory_read / external_directory_write  方向键（读写独立判定）
+  //   bash / powershell / read / write / edit / find / grep / ls  内置工具
+  //   任意其他已注册工具名（catchall）
+  // 不设置时的默认动作矩阵：read / find / grep / ls → allow；write / edit / bash / powershell / 其余未知工具 → review；
+  //   external_directory 两个方向 → review；path 两个方向不表态，由规则给出。
+  // 值的三种写法（按此顺序判定）：
+  //   1) "deny"                              单个动作（等价于模式 "*"）
+  //   2) { "action": "deny", "reason": "…" } 带理由的动作，reason 会展示给 agent（只允许 action 与 reason 两个键）
+  //   3) { "rm *": "review", "rm -rf /*": "deny" }  模式到动作的映射
+  // 四种动作：allow=静默放行（无模型调用、无弹窗）；deny=直接拒绝；ask=人工确认；review=交评审模型判断。
+  // pattern 语法："*" 匹配任意字符且跨路径分隔符（"**" 不特殊）；"?" 匹配单字符；
+  //   结尾的 " *" 让空格与参数可选（"git *" 也匹配裸 `git`）；~/ 与 $HOME/ 会展开；模式整体锚定为 ^…$。
+  // 编排顺序（最容易踩的坑，因为 last-match-wins）：① 宽泛基线 → ② 人工确认 → ③ 直接拒绝 → ④ 明确放行。
+  //   把 "rm -rf /*" 写在 "rm *" 前面，它永远会被后者覆盖，护栏形同虚设。
+  "permission": {
+    // read / find / grep / ls：只读工具。显式列出与默认矩阵一致，便于按需收紧为 deny / ask。
+    "read": "allow",
+    "find": "allow",
+    "grep": "allow",
+    "ls": "allow",
+    // write / edit：覆盖类操作难以回滚，默认交评审模型复查。
+    "write": "review",
+    "edit": "review",
+
+    // path：敏感路径（语法糖，读与写独立判定，external_directory 同理）。
+    //   路径会同时以词法形与符号链接解析后的真实形参与匹配，因此指向 ~/.ssh 的软链也会被 */.ssh/* 命中。
+    //   Windows 下大小写不敏感且 / 与 \ 等价，POSIX 下大小写敏感。
+    //   只写 path 会同时作用于读与写；要精确控制方向用 path_read / path_write（语法糖的展开总是排在方向键之前，
+    //   因此同层内显式方向键可以覆盖语法糖产生的同名模式，反之不成立）。
+    "path": {
+      "*.env": "deny",
+      "*.env.*": "deny",
+      "*.pem": "deny",
+      "*/.ssh/*": "deny",
+      "*/id_rsa*": "deny",
+      "*/.git-credentials": "deny",
+      "*/.npmrc": "review",
+      // 需要把理由展示给 agent 时改用对象写法（只允许 action 与 reason 两个键）：
+      "*/.pi/agent/auth.json": {
+        "action": "deny",
+        "reason": "pi 的模型凭据文件，请使用 /perm 或人工方式处理"
+      }
+    },
+
+    // external_directory：工作目录之外的读写 —— 本插件要解决的核心场景，两个方向默认 review。
+    //   用 workingDirectory.allowRoots 把 monorepo 的兄弟包纳入"内部"，比这里逐条放行更清晰。
+    "external_directory": {
+      // 宽泛基线：工作目录之外一律交评审；下面几条是高频只读位置的白名单。
+      "*": "review",
+      "*/.pi/agent/skills/*": "allow",
+      "*/.pi/agent/sessions/*": "allow",
+      "*/.pi/agent/git/*": "allow",
+      "*/node_modules/@earendil-works/*": "allow",
+      "*/dev/null": "allow"
+    },
+
+    // bash：命令单元级的规则。这里只列四段的代表项，完整清单见 config/config.json。
+    "bash": {
+      // ① 宽泛基线：删除、覆盖、移动类交评审模型复查。
+      "rm *": "review",
+      "mv *": "review",
+      "truncate *": "review",
+      // ② 人工确认：影响面超出当前工作目录，或产生对外副作用。
+      "git push*": "ask",
+      "git reset --hard *": "ask",
+      "npm publish*": "ask",
+      "sudo *": "ask",
+      "curl * | sh": "ask",
+      // ③ 直接拒绝：不可回滚或明确的破坏性形态。
+      "rm -rf /": "deny",
+      "rm -rf /*": "deny",
+      "rm -rf ~/*": "deny",
+      "mkfs*": "deny",
+      "dd *of=/dev/*": "deny",
+      // ④ 明确放行：高频、可重建的构建产物。必须写在最后，否则会被前面的宽泛规则覆盖。
+      "rm -rf ./node_modules": "allow",
+      "rm -rf ./dist": "allow",
+      "rm -rf ./coverage": "allow",
+      "rm -f ./*.log": "allow"
+    },
+
+    // powershell：Windows 上的同类规则（此文件在 Windows 与 POSIX 上通用，未命中的 surface 不影响裁决）。
+    "powershell": {
+      // 宽泛基线：语义相近的别名逐条列出，因为匹配只看"可执行名 + 参数前缀"，不会做别名归并。
+      "Remove-Item *": "review",
+      "ri *": "ask",
+      "del *": "ask",
+      "rd *": "ask",
+      // 直接拒绝：递归强删系统盘 / 系统目录。
+      "Remove-Item -Recurse -Force C:/*": "deny",
+      "Remove-Item -Recurse -Force $env:SystemRoot*": "deny",
+      // 明确放行：可重建的构建缓存。
+      "Remove-Item -Recurse -Force ./.next": "allow"
+    }
+
+    // 未在示例中展开的 surface：
+    //   "path_read" / "path_write"                 path 的分离写法，只影响一个方向
+    //   "external_directory_read" / "_write"       同上
+    //   任意其他已注册工具名（例如 "subagent"）     需用 gate: "all" 或 extraTools 让它进入求值
+  }
+}

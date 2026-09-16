@@ -3,6 +3,7 @@
 配套文件：
 
 - 参考配置：[`config/config.json`](../config/config.json) —— **严格 JSON**（无注释），带 `$schema`，可直接复制后修改
+- 逐字段讲解示例：[`config/config.example.jsonc`](../config/config.example.jsonc) —— 与本文档逐节对应的 JSONC 示例，每个字段带 `//` 说明；规则表只列代表项，完整清单与可直接使用的基线见参考配置
 - Schema：[`schemas/guardian.schema.json`](../schemas/guardian.schema.json) —— 编辑器补全与实时校验的来源
 - 需求依据：[`docs/requirements.md`](requirements.md)（FR 编号）、[`docs/architecture.md`](architecture.md)（章节编号）
 

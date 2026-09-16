@@ -45,12 +45,14 @@ pi remove -l npm:pi-permission-guardian    # 项目级设置（项目未信任�
 
 参考配置：[`config/config.json`](config/config.json) —— **严格 JSON**，带 `$schema`，编辑器可直接补全与实时校验。
 
+逐字段讲解示例：[`config/config.example.jsonc`](config/config.example.jsonc) —— 每个字段都带 `//` 说明，取值与默认值一致（规则表只列代表项，完整清单见参考配置）。
+
 | 作用域 | 路径 | 生效条件 |
 |---|---|---|
 | 全局 | `<agentDir>/extensions/pi-permission-guardian/config.json` | 始终加载 |
 | 项目 | `<cwd>/.pi/extensions/pi-permission-guardian/config.json` | 仅当项目被信任（`ctx.isProjectTrusted()`） |
 
-**你手写的配置可以带注释与尾逗号**；官方参考配置不带注释，是为了让 `$schema` 保持有效——活的 schema 比死的注释更有用。理由与取舍见 [docs/configuration.md §1](docs/configuration.md)。
+**你手写的配置可以带注释与尾逗号**（`config.example.jsonc` 就是这样的文件，去掉注释即为合法配置）；官方参考配置不带注释，是为了让 `$schema` 保持有效——活的 schema 比死的注释更有用。理由与取舍见 [docs/configuration.md §1](docs/configuration.md)。
 
 跨作用域合并时**最严格者胜**（`deny > ask > review > allow`）；同一作用域内**后写的规则覆盖先写的**（last-match-wins，所以具体规则必须写在宽泛规则之后）。
 
