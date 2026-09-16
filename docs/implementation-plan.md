@@ -351,18 +351,27 @@ src/decision/pipeline.ts
 
 ```text
 package.json
+.github/workflows/ci.yml
+scripts/check-pack.ts
 README.md
+docs/smoke-test.md
 schema generation script
-CI workflow
 ```
 
 ### 工作项
 
-1. 确认 package `files` 包含 `extensions/`、`src/`、`schemas/`、`config/` 和必要文档。
-2. 在 `prepack` 前生成 schema，并校验提交的 schema 与 zod 输出一致。
-3. README 增加安装、配置、`/perm` 命令、已知限制和卸载说明。
-4. CI 至少执行 typecheck、test、schema 校验和 package dry-run。
-5. 使用真实 pi 0.85.1 会话跑 S1 至 S7 手动冒烟，记录未验证的平台边界。
+1. `files` 覆盖 `extensions/`、`src/`、`schemas/`、`config/` 与文档（README、LICENSE、`docs/`）；由 `scripts/check-pack.ts`（`npm run check:pack`）真实执行一次 `npm pack --dry-run --json` 并断言：必需文件齐全、`pi.extensions` 入口的相对 import 闭包全在 tarball 内、不含 `test/` `scripts/` `reference/` `node_modules/` `.github/`。
+2. `prepack` 在打包前重新生成 schema，保证发出去的那份永远与 zod 同步；“提交版 schema 与 zod 输出一致”的漂移门禁由 `test/config/schema.test.ts` 与 `check:pack` 的“prepack 是否就地改写”检测共同承担。
+3. README 增加安装（npm / git / 本地路径、全局与 `-l` 项目级、`pi -e` 试用）、卸载回滚、`/perm` 命令、已知限制与平台验证范围。
+4. CI（`.github/workflows/ci.yml`）在 `ubuntu-latest` 与 `windows-latest` 上依次执行 typecheck、test、`validate:config`、`check:pack`（含 package dry-run）。
+5. 真实 pi 0.85.1 会话冒烟：不依赖评审模型与交互 UI 的环节已在 Windows 执行并记录在 `docs/smoke-test.md`（安装/卸载、加载、`/perm status`、S1、S2、S6 未配置分支、非法配置 fail-closed、审计落盘）；S3、S4 的工具路径、S5、S7 与真实超时分支需人工执行，同文档给出步骤、期望与未验证的边界。
+
+### 验证门禁
+
+- `npm run typecheck`
+- `npm test`
+- `npm run validate:config`
+- `npm run check:pack`（内部执行 `npm pack --dry-run`）
 
 ### 最终验收
 
@@ -381,8 +390,8 @@ CI workflow
 | decision pipeline | 假 registry、假 UI、假 clock | M3 至 M5 |
 | review | 假 `complete`、不同 Model.api、超时与畸形输出 | M4 |
 | extension integration | 假 ExtensionAPI/Context 记录返回结果 | M4 至 M6 |
-| package | schema 正负校验、npm pack dry-run | M7 |
-| 手动冒烟 | 真实 pi 会话 | M7 |
+| package | schema 正负校验、`npm pack --dry-run` 内容断言（`npm run check:pack`） | M7 |
+| 手动冒烟 | 真实 pi 会话（记录见 `docs/smoke-test.md`） | M7 |
 
 每个里程碑合并前至少执行：
 
@@ -401,8 +410,10 @@ npm run validate:config
 涉及 package 元数据时额外执行：
 
 ```bash
-npm pack --dry-run
+npm run check:pack
 ```
+
+`check:pack` 内部执行 `npm pack --dry-run`，并断言 tarball 内容与 schema 漂移；CI 同样用它代替裸露的 dry-run。
 
 命令名以 M0 实际 package scripts 为准；若调整，必须同步 CI 和本计划。
 
@@ -425,6 +436,6 @@ npm pack --dry-run
 
 1. FR-1 至 FR-61 均有对应实现或明确的文档化边界。
 2. 架构文档列出的所有负向测试均存在并稳定通过。
-3. pi 0.85.1 下真实安装、加载、`/perm status` 和 S1 至 S7 冒烟通过。
+3. pi 0.85.1 下真实安装、加载、`/perm status` 和 S1 至 S7 冒烟通过（已执行范围与待人工场景见 `docs/smoke-test.md`）。
 4. 参考配置、schema、README 和实现行为一致。
 5. 不存在未说明的 fail-open 分支、未受控外部协议覆盖或绕过子代理护栏的已知路径。
