@@ -36,7 +36,9 @@
     "test:watch": "vitest",
     "gen:schema": "node --experimental-strip-types scripts/generate-schema.ts",
     "gen:corpus": "node --experimental-strip-types scripts/gen-bash-corpus.ts",
-    "validate:config": "node --experimental-strip-types scripts/validate-config.ts"
+    "validate:config": "node --experimental-strip-types scripts/validate-config.ts",
+    "check:pack": "node --experimental-strip-types scripts/check-pack.ts",
+    "prepack": "npm run gen:schema"
   },
   "dependencies": {
     "tree-sitter-bash": "^0.25.1",
