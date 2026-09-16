@@ -8,6 +8,7 @@
     "moduleResolution": "Bundler",
     "strict": true,
     "noEmit": true,
+    "allowImportingTsExtensions": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true,
@@ -22,6 +23,7 @@
   },
   "include": [
     "extensions",
+    "scripts",
     "src",
     "test",
     "vitest.config.ts"

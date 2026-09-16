@@ -2,15 +2,15 @@ import { readFile } from "node:fs/promises";
 
 import { describe, expect, it } from "vitest";
 
-import guardianExtension from "../../extensions/guardian";
+import guardianExtension from "../../extensions/guardian.ts";
 import {
   GUARDIAN_COMMAND,
   GUARDIAN_EVENTS,
   GUARDIAN_FLAG,
   registerGuardian,
-} from "../../src/extension/register";
-import { createFakeContext } from "../support/fake-context";
-import { createFakePi } from "../support/fake-pi";
+} from "../../src/extension/register.ts";
+import { createFakeContext } from "../support/fake-context.ts";
+import { createFakePi } from "../support/fake-pi.ts";
 
 describe("M0 extension skeleton", () => {
   it("loads through the package entry and registers the inert surface", async () => {

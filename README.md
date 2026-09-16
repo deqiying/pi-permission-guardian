@@ -2,7 +2,7 @@
 
 pi agent 的命令执行护栏插件：**黑白名单快速裁决 + 名单外/需复查项交由模型判定**，在高风险操作与跨工作目录读写场景下减少人工介入。斜杠命令为 `/perm`。
 
-> 当前状态：**M0 工程骨架已建立**，业务裁决逻辑尚未实现。
+> 当前状态：**M1 配置、生命周期与命令面已实现**（配置加载/合并/规范化、`/perm` 命令、会话状态与审计日志）；事实提取与裁决逻辑从 M2 开始。
 
 ## 核心设计一句话
 
@@ -31,6 +31,30 @@ pi agent 的命令执行护栏插件：**黑白名单快速裁决 + 名单外/�
 跨作用域合并时**最严格者胜**（`deny > ask > review > allow`）；同一作用域内**后写的规则覆盖先写的**（last-match-wins，所以具体规则必须写在宽泛规则之后）。
 
 Schema：[`schemas/guardian.schema.json`](schemas/guardian.schema.json)。
+
+### `/perm` 子命令
+
+| 子命令 | 行为 |
+|---|---|
+| `/perm`、`/perm status` | 打印完整自检报告：总开关、配置路径与状态、规则条数、评审模型可用性、`userBashPolicy` / 子代理覆盖、grants / cache / 熔断计数、审计日志 |
+| `/perm on` / `/perm off` | 仅本会话启用/停用护栏，优先于配置总开关与 `--perm` |
+| `/perm reload` | 重新读盘、重新合并配置，规则条数与配置版本号会在 `status` 中变化 |
+| `/perm grants` | 列出本会话的人工授权记忆（仅内存，会话结束失效） |
+| `/perm clear-grants` | 清空本会话的授权记忆 |
+
+`--perm` 命令行 flag 可在配置 `enabled: false` 时仍让会话参与裁决；实际是否生效按 `会话覆盖 > --perm / config.enabled` 的顺序决定。
+
+## 开发
+
+| 命令 | 用途 |
+|---|---|
+| `npm run typecheck` | 严格 TypeScript 检查（含测试与脚本） |
+| `npm test` | vitest 单元测试 |
+| `npm run gen:schema` | 从 `src/config/schema.ts`（zod 唯一真源）重新生成 `schemas/guardian.schema.json` |
+| `npm run validate:config` | 校验官方参考配置是严格 JSON、且同时通过 zod 与提交版 schema |
+
+修改配置结构时必须先改 zod schema，再跑 `gen:schema`；提交版 schema 与生成结果不一致时测试会失败（FR-57）。
+运行时依赖只有 `zod`（配置 schema 的单一真源）；pi 相关包均为 `peerDependencies`，由宿主提供。
 
 ## 许可证
 

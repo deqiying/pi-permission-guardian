@@ -35,6 +35,24 @@
 
 config 解析失败时 fail-closed：该层的所有 `allow` 抬升为 `review`，并提示具体错误位置（FR-51）。
 
+### 1.3 失效层的处理（FR-51）
+
+一层配置坏掉时，处理目标是"既不静默放行，也不连带丢掉用户显式写的 `deny`"：
+
+| 情况 | 处理 |
+|---|---|
+| JSON 语法错误（无法读出任何字段） | 该层整体不生效，报出原文行号；未命中规则的默认动作按保守侧处理 |
+| JSON 合法但校验失败 | 把 `permission` 里的 `allow` 抬升为 `review`，再按"顶层字段 → surface → 单条模式规则"逐级重新校验：合法部分继续生效，非法部分被忽略并逐条列出 |
+| 抬升后仍无任何可用字段 | 该层整体不生效，等同于上一条 |
+
+抢救粒度是刻意的：`permission` 里写错一条规则，只会丢掉那一条，同一层里其余 `deny` 仍然生效。
+
+三个失败分支开关不接受 `allow`（见 §4），写错时它们不会被抬升，而是直接被丢弃并落回更严格的默认值（`deny` / `review` / `deny`）。
+
+"未命中规则的默认动作按保守侧处理"指：存在失效层时，未命中规则的调用不再用默认动作矩阵里的 `allow`，而是按 `review` 处理。原因很直接：坏配置里可能原本就有一条 `deny`，我们读不出来，就不能假定它不在。
+
+被抬升的只有动作取值本身；规则模式、`reason` 文本与其余配置字段都原样保留。
+
 ## 2. 顶层开关
 
 | 字段 | 默认 | 说明 |
@@ -45,6 +63,8 @@ config 解析失败时 fail-closed：该层的所有 `allow` 抬升为 `review`�
 | `debugLog` | `false` | 额外记录 facts 全文与评审提示词。**可能含会话内容**，默认关闭 |
 
 `yoloMode` 与 `enabled` 的区别：`enabled: false` 让护栏完全不参与；`yoloMode: true` 让护栏继续评估、继续记账，只是不拦。排查"某条规则是否命中"时用 `yoloMode` 更合适。
+
+`enabled: false` 是"默认不参与"，不是"永久失效"：`--perm` flag 或 `/perm on` 仍可让本会话参与裁决，实际是否生效按 `会话覆盖 > --perm / config.enabled` 的顺序决定。`/perm status` 会同时打印这四个值，便于确认当前状态。
 
 审计日志字段：
 
@@ -75,6 +95,8 @@ config 解析失败时 fail-closed：该层的所有 `allow` 抬升为 `review`�
 | `onReviewUnavailable` | `"deny"` | 评审超时 / 模型报错 / 输出无法解析 / `reviewer.model` 未配置（FR-19） |
 | `onUnresolvedFacts` | `"review"` | bash 解析失败、包装器（`bash -c`、`sudo`、`xargs`）内部不可展开、路径非字面量（FR-12/14/15） |
 | `onAskWithoutUI` | `"deny"` | 需要人工确认但没有交互界面：`print` / `json` 模式、无 UI 的子代理会话 |
+
+这三个开关只接受 `"deny"` / `"ask"` / `"review"`，**不接受 `"allow"`**（D7）：它们描述的都是"本次没能得出安全结论"的情形，允许就地配成 `allow` 等于让"拔网线 / 写错模型名 / 解析不了"成为绕过手段。需要整体放宽时用 `yoloMode`，不要用这些开关。配置里写了 `allow` 会被当作非法值处理（该字段被忽略并落回默认值，同时提示配置失效）。
 | `onMixedCommandActions` | `"deny"` | 同一 shell 调用的多个已解析命令单元中，同时存在裁决结果为 `allow` 与 `deny` 的单元 |
 
 `onReviewUnavailable` 默认 `deny` 的理由：`unavailable` 是基础设施结果，不是安全结论。若放行，等于让"拔网线 / 配错模型名"成为绕过手段。
@@ -103,6 +125,24 @@ echo ok && rm -rf /
 默认得到 `deny`；配置 `"onMixedCommandActions": "review"` 后，整条调用交给评审模型；配置为 `"ask"` 后交给人工确认。
 
 该字段是安全敏感项，全局层未配置时基线为 `deny`，全局层可以显式选择 `ask` / `review` / `deny`；项目层再按 `deny > ask > review` 与全局层取最严格者。项目配置只能把全局的 `review` 收紧为 `ask` / `deny`，不能把默认或全局的 `deny` 放宽为 `ask` / `review`。`yoloMode=true` 仍可把所有 `ask` / `review` 重写为 `allow`，这是总逃生舱的既有语义。
+
+### 4.2 安全敏感字段的跨层合并
+
+`onMixedCommandActions`、`userBashPolicy`、`subagentPolicy` 都是"跨层只能收紧"的字段，合并规则如下（FR-56、FR-60）：
+
+| 字段 | 合并规则 |
+|---|---|
+| `onMixedCommandActions` | 基线 = 全局层的显式取值（全局层没写就是 `deny`）；项目层只能在此基础上按 `deny > ask > review` 收紧 |
+| `userBashPolicy.enabled` | 任一层显式配置为 `true` 即保持拦截 |
+| `userBashPolicy.autoReview` | 任一层显式配置为 `false` 即转人工确认 |
+| `userBashPolicy.model` | 更具体的一层覆盖（项目层写 `null` 表示显式回到 `reviewer.model`） |
+| `subagentPolicy.enabled` | 任一层显式配置为 `true` 即启用子代理策略 |
+| `subagentPolicy.defaultAction` | 在显式配置的层之间按 `deny > ask > review` 取最严格者 |
+| `subagentPolicy.allowSessionGrants` | 任一层显式配置为 `false` 即禁止子代理创建或使用会话授权 |
+
+`onMixedCommandActions` 的基线特殊：它始终参与比较，所以**只写项目层**的 `review` 不会把默认或全局的 `deny` 放宽；全局层写了 `review`、项目层写 `ask` 时结果为 `ask`。
+
+其余字段遵循**"没有写该字段的层不投票"**：默认值不参与这些跨层收紧判断，否则会出现两个反直觉后果：全局层关掉 `userBashPolicy.enabled` 会被一个只改了 `model` 的项目层用默认值重新打开；项目层只是没写 `defaultAction`，却用默认 `review` 收紧了全局层显式配置的 `ask`。所有层都没写该字段时，才落到 schema 默认值。
 
 ## 5. 评审器
 
@@ -271,6 +311,14 @@ pwd, ls, cat, head, tail, wc, git status, git diff, git log, git show
 
 模式整体锚定为 `^...$`。
 
+一个值的形态按下面的顺序判定，这决定了 `permission.bash` 到底是"一条动作"还是"一组模式"：
+
+1. 字符串 → 该 surface 的动作（等价于模式 `*`）；
+2. 对象，且 `action` 是四种动作之一、除 `action` 外只允许 `reason` → 一条带理由的动作；
+3. 其余对象 → 模式到动作的映射（`{"action": "deny"}` 之外的情况，例如 `{"rm *": "review"}`）。
+
+第 2 条优先于第 3 条：`{ "action": "deny", "reason": "..." }` 会被当成"一条动作"，而不是模式 `action` 到动作 `deny` 的映射。要用名为 `action` 的模式，请另外加一个模式键，让它不满足"只有 action 与 reason"这个条件。
+
 ### 8.5 路径面的匹配细节
 
 - 路径值会**同时以词法形与符号链接解析后的真实形**参与匹配，因此指向 `~/.ssh` 的软链也会被 `*/.ssh/*` 命中（FR-16）
@@ -294,6 +342,8 @@ pwd, ls, cat, head, tail, wc, git status, git diff, git log, git show
 | 任意其他工具名 | 该工具 | `review` | 未知语义 |
 
 `path` 与 `external_directory` 是**语法糖**：加载时展开为对应的 `*_read` / `*_write` 方向键（FR-3）。两个方向独立判定，`external_directory_read: allow` 不会顺带放行写操作。
+
+语法糖的展开**总是排在对应的显式方向键之前**，与你在文件里的书写顺序无关。因此同一个 surface 内，显式 `path_read` / `path_write` 可以覆盖 `path` 产生的同名模式（last-match-wins），反之不成立：把 `path` 写到最后也压不过已写的 `path_read`。需要精确控制优先级时，直接用方向键、不要用语法糖。
 
 ### 8.7 参考配置中 bash 规则的分组说明
 

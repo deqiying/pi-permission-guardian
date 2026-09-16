@@ -1,4 +1,7 @@
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionCommandContext,
+  ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 
 export interface FakeUiCalls {
   notifications: Array<{
@@ -32,6 +35,8 @@ export interface FakeContextOptions {
   selectResult?: string;
   confirmResult?: boolean;
   inputResult?: string;
+  /** 供 `modelRegistry.find` 命中，键为 `provider/model-id`。 */
+  models?: Record<string, { api: string }>;
 }
 
 const noop = (): void => {};
@@ -121,9 +126,9 @@ export function createFakeContext(
   };
 
   const modelRegistry = {
-    find(provider: string, modelId: string): undefined {
+    find(provider: string, modelId: string): { api: string } | undefined {
       modelRegistryCalls.find.push({ provider, modelId });
-      return undefined;
+      return options.models?.[`${provider}/${modelId}`];
     },
     async complete(...args: unknown[]): Promise<never> {
       modelRegistryCalls.complete.push(args);
@@ -154,4 +159,29 @@ export function createFakeContext(
   };
 
   return context as unknown as FakeContext;
+}
+
+/**
+ * 命令处理器需要的 `ExtensionCommandContext`。
+ *
+ * 扩展自己的命令只用 `ui` / `modelRegistry` / `cwd` / `isProjectTrusted`，其余会话控制方法给出桩实现，
+ * 保证测试不会意外触发真实会话切换。
+ */
+export function createFakeCommandContext(
+  options: FakeContextOptions = {},
+): FakeContext {
+  const context = createFakeContext(options);
+  const stub = async (): Promise<{ cancelled: boolean }> => ({ cancelled: false });
+  const extra: Partial<ExtensionCommandContext> = {
+    getSystemPromptOptions: (): never => {
+      throw new Error("Fake command context does not implement prompts");
+    },
+    waitForIdle: async (): Promise<void> => {},
+    newSession: stub,
+    fork: stub,
+    navigateTree: stub,
+    switchSession: stub,
+    reload: async (): Promise<void> => {},
+  };
+  return Object.assign(context, extra) as FakeContext;
 }

@@ -27,6 +27,8 @@ export interface FakePi {
     args: string,
     ctx: ExtensionCommandContext,
   ): Promise<void>;
+  /** 模拟命令行传入的 flag（例如 `--perm`）。 */
+  setFlag(name: string, value: boolean | string | undefined): void;
 }
 
 export function createFakePi(): ExtensionAPI & FakePi {
@@ -82,7 +84,12 @@ export function createFakePi(): ExtensionAPI & FakePi {
     },
     registerFlag(name: string, options: FlagOptions): void {
       flags.set(name, options);
-      flagValues.set(name, options.default);
+      if (!flagValues.has(name)) {
+        flagValues.set(name, options.default);
+      }
+    },
+    setFlag(name: string, value: boolean | string | undefined): void {
+      flagValues.set(name, value);
     },
     getFlag(name: string): boolean | string | undefined {
       return flagValues.get(name);

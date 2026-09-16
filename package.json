@@ -33,7 +33,12 @@
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.check.json",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "gen:schema": "node --experimental-strip-types scripts/generate-schema.ts",
+    "validate:config": "node --experimental-strip-types scripts/validate-config.ts"
+  },
+  "dependencies": {
+    "zod": "^4.6.5"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": ">=0.85.1",

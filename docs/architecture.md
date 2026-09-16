@@ -429,7 +429,7 @@ interface CompiledRule {
 |---|---|---|
 | `enabled` / `yoloMode` / `auditLog` / `debugLog` | 总开关、逃生舱、日志级别 | `yoloMode=true` 时所有 `ask`/`review` 重写为 `allow`，状态栏必须显著提示（FR-53）；审计日志按日切分并默认保留 14 天 |
 | `gate` / `extraTools` | 评估范围（architecture §4.0） | `side-effect` 覆盖全部 pi 内置工具；自定义/MCP 工具需 `all` 或 `extraTools` |
-| `onReviewUnavailable` / `onUnresolvedFacts` / `onAskWithoutUI` | 三个失败分支的动作（§9） | 默认分别为 `deny` / `review` / `deny` |
+| `onReviewUnavailable` / `onUnresolvedFacts` / `onAskWithoutUI` | 三个失败分支的动作（§9） | 默认分别为 `deny` / `review` / `deny`；只能配 `deny` / `ask` / `review`，不接受 `allow`（D7） |
 | `onMixedCommandActions` | 同一 shell 调用跨命令单元出现 `allow` / `deny` 冲突时的调用级动作 | 默认 `deny`，可选 `ask` / `review` / `deny`；global/default 定义基线，project 只能收紧 |
 | `reviewer` | 评审模型、deadline、证据循环、风险门槛 | `model` 必填；`maxAllowRiskLevel` 实现 FR-23 |
 | `userBashPolicy` | 用户直接执行 `!command` / `!!command` 的开关、自动审核与模型 | 跨层时 `enabled=true` 和 `autoReview=false` 优先；模型可显式覆盖；deny 使用替代 `BashResult` 阻断 |

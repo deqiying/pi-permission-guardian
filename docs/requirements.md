@@ -206,7 +206,7 @@ agent 读取 `~/.pi/agent/` 下的会话文件，或写入 `../other-project/` �
 | **D4** | 覆盖面：`bash`/`powershell`、`write`/`edit`、`read`/`find`/`grep`/`ls`、`external_directory`、子代理 | `read` 面纳入是因为"外部目录读取"是真实的信息泄露面（`~/.ssh`、`.env`、认证文件），而它不写任何东西，单看写操作面很容易漏掉 |
 | **D5** | 跨层合并用最严格者胜，顺序 **`deny > ask > review > allow`** | `ask` 排在 `review` 之前，因为"用户要求亲自确认"比"交给模型判断"更保守；`review` 让模型有拒绝能力，因此比 `allow` 严格 |
 | **D6** | 评审模型只能来自 pi 模型配置文件，通过 model registry 解析，并沿用该模型配置的接口协议；不回退到当前会话模型 | 审查主体必须独立配置；插件不自行选择 wire API、不覆盖认证/headers，避免配置文件与真实请求协议漂移 |
-| **D7** | 评审不可用时 **fail-closed（默认 `deny`）** | `unavailable` 是基础设施结果，不是安全结论。放行等于让"拔网线"成为绕过手段。配置项 `onReviewUnavailable` 保留逃生舱，但默认最严格 |
+| **D7** | 评审不可用时 **fail-closed（默认 `deny`）** | `unavailable` 是基础设施结果，不是安全结论。放行等于让"拔网线"成为绕过手段。三个失败分支开关（`onReviewUnavailable` / `onUnresolvedFacts` / `onAskWithoutUI`）只能配 `deny` / `ask` / `review`，**不接受 `allow`**：需要放宽护栏时使用 `yoloMode`（会写审计日志并在状态栏显著提示），而不是就地埋一个静默放行开关 |
 | **D8** | 启用全部降本机制：会话授权记忆、判定缓存、熔断器、审计日志、非阻塞预评分 | 前四项是"减少人工介入开销"的直接手段；预评分因其"先放行、后判定"的实际语义与护栏的保守取向相反，**默认关闭**，由用户显式开启 |
 | **D9** | 交付物分两份：需求文档 + 架构设计文档 | 先对齐"做什么"，再对齐"怎么做"；实施计划另行产出 |
 | **D10** | 参考源码拉取到项目内 `reference/` 并加入 `.gitignore`；插件从一开始按 **pi package** 组织 | `reference/` 便于离线查阅且不污染仓库；package 形态保证依赖声明（tree-sitter-bash、zod）与分发路径从第一天就正确 |
