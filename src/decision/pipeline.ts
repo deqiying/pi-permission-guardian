@@ -29,21 +29,39 @@ import {
   grantKeysForObjects,
   isCallGranted,
 } from "../policy/session-grants.ts";
+import { classifierAllows } from "../review/classifier.ts";
 import { createEvidenceTools } from "../review/evidence.ts";
 import { requestReview, type ReviewerRegistry } from "../review/reviewer.ts";
 import { transcriptFromEntries } from "../review/transcript.ts";
 import type { ReviewOutcome } from "../review/types.ts";
+import {
+  BREAKER_REASON,
+  breakerBlocksFastPath,
+  breakerTripped,
+  recordBreakerAllow,
+  recordBreakerDeny,
+} from "./breaker.ts";
+import {
+  decisionCacheKey,
+  isCacheable,
+  readCache,
+  writeCache,
+} from "./cache.ts";
 import { withAntiCircumvention, type DecisionOutcome } from "./outcome.ts";
 import { applyReviewOutcome } from "./policy.ts";
 
 /**
  * 决策管线（architecture §4）。
  *
- * 顺序：engaged → classify → facts → gate → rule → grant → review → ask → outcome。
+ * 顺序：engaged → gate → 熔断 → classify → facts → rule → grant → cache → 预评分 → review → ask
+ * → outcome → 熔断记账 → 写缓存。
  * - **grant 在 rule 之后**：授权只能把 `ask` / `review` 放宽为 `allow`，永不覆盖 `deny`，
  *   且 `unresolved` 调用不享受授权（用户决策 2026-01，见 docs/architecture.md §4/§8.1）。
+ * - **cache 在 grant 之后、review 之前**：只复用确定结论，且 `unresolved` 调用跳过（FR-31/32）。
+ * - **预评分只放行**（FR-36）：它排在评审之前，但受 FR-35（被拒过的工具失去快路径）与
+ *   `unresolved` 限制，永远不会产生 deny。
+ * - **熔断（FR-34）**：本轮被拒绝的次数达阈值后，后续调用直接拦截并 `terminate` 本轮。
  * - **review 交评审模型**（M4）：结论还要过 FR-23 的风险门槛；评审不可用走 `onReviewUnavailable`。
- * - 缓存与熔断是 M5 的事，这里不预留空壳。
  *
  * `tool_call` 与 `user_bash` 共用同一个内核：两个入口只负责把自己的事件形状翻译成
  * `DecisionRequest`，再把自己的返回协议贴回去，裁决逻辑只有一份。
@@ -66,6 +84,13 @@ export interface DecisionEngineDeps {
   /** 事实层环境；缺省取宿主进程的 home / platform。测试注入用。 */
   env?: { home?: string; platform?: NodeJS.Platform };
   warn?: (message: string) => void;
+  /**
+   * 每次结论落定后的观测回调（状态栏等）。
+   *
+   * 放在这里而不是两个入口各自实现：`tool_call` 与 `user_bash` 的结论必须产生同一份观测，
+   * 否则不同入口会长出不同字段（M5 门禁）。回调不得影响返回值。
+   */
+  onDecision?: (outcome: DecisionOutcome, ctx: ExtensionContext) => void;
 }
 
 export interface DecisionEngine {
@@ -183,6 +208,11 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
   ): void {
     deps.runtime.callIndex += 1;
     const callIndex = deps.runtime.callIndex;
+    deps.runtime.lastDecision = {
+      final: outcome.final,
+      source: outcome.source,
+      toolName: request.toolName,
+    };
     try {
       deps.audit.record({
         ts: new Date().toISOString(),
@@ -224,6 +254,12 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
       // 会话内记录同样不进入关键路径。
       warn(`[pi-permission-guardian] appendEntry 失败：${describeError(error)}`);
     }
+    try {
+      deps.onDecision?.(outcome, ctx);
+    } catch (error) {
+      // 观测面（状态栏）失败同样不能影响裁决。
+      warn(`[pi-permission-guardian] 决策观测回调失败：${describeError(error)}`);
+    }
   }
 
   function failClosed(
@@ -264,6 +300,23 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
     }
 
     const started = Date.now();
+
+    // 熔断（FR-34）：本轮已触发时，进入评估范围的调用一律拦截并提前结束本轮。
+    // 检查放在 facts 之前：它只需要内存里的计数，不必为一条注定被拦的命令去解析 bash。
+    if (breakerTripped(deps.runtime.breaker)) {
+      const outcome: DecisionOutcome = {
+        proposed: "deny",
+        final: "deny",
+        source: "circuit-breaker",
+        reason: withAntiCircumvention(BREAKER_REASON),
+        surface: toolSurface(toolName),
+        targets: [],
+        terminate: true,
+      };
+      record(ctx, request, outcome, Date.now() - started);
+      return outcome;
+    }
+
     // 命令实际执行的工作目录可能不同于会话 cwd（`user_bash` 事件自带 cwd）。
     const cwd = request.cwd ?? ctx.cwd;
     const factsContext: FactsContext = {
@@ -289,17 +342,107 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
       return outcome;
     }
 
+    const cacheKey = cacheKeyForCall(call, request, config, cwd);
+
     let outcome: DecisionOutcome;
     try {
-      outcome = await resolveOutcome({ call, facts, request, config, ctx });
+      outcome = await resolveOutcome({ call, facts, request, config, ctx, cacheKey });
     } catch (error) {
       outcome = failClosed(
         toolName,
         `护栏内部异常，按 fail-closed 拦截：${describeError(error)}`,
       );
     }
+    applyBreakerAccounting(outcome, toolName, config);
+    storeCache(outcome, cacheKey, config);
     record(ctx, request, outcome, Date.now() - started);
     return outcome;
+  }
+
+  /** 评审模型规格：`user_bash` 先用 `userBashPolicy.model`，否则用 `reviewer.model`（FR-60）。 */
+  function reviewModelSpec(
+    request: DecisionRequest,
+    config: ResolvedConfig,
+  ): string | undefined {
+    return request.origin === "user_bash"
+      ? (config.userBashPolicy.model ?? config.reviewer.model)
+      : config.reviewer.model;
+  }
+
+  /**
+   * 判定缓存的 key（FR-31）。
+   *
+   * 关闭缓存、`TTL <= 0`、或 facts 带 `unresolved` 时返回 `undefined`：无法稳定复现的目标
+   * 不该被复用（architecture §8.2）。查询与写入共用这一个判据，避免"查得到但写不进"。
+   */
+  function cacheKeyForCall(
+    call: CallEvaluation,
+    request: DecisionRequest,
+    config: ResolvedConfig,
+    cwd: string,
+  ): string | undefined {
+    if (!config.cache.enabled || config.cache.ttlMs <= 0) {
+      return undefined;
+    }
+    if (call.evaluations.some((evaluation) => evaluation.object.unresolved !== undefined)) {
+      return undefined;
+    }
+    const objects = call.evaluations.map((evaluation) => evaluation.object);
+    return decisionCacheKey({
+      surface: call.decisive?.object.surfaces[0] ?? toolSurface(request.toolName),
+      targets: objects.flatMap((object) => object.targets),
+      directions: objects.flatMap((object) =>
+        object.direction === undefined ? [] : [object.direction],
+      ),
+      cwd,
+      configVersion: deps.runtime.configVersion,
+      authorizationVersion: deps.runtime.authorizationVersion,
+      reviewerModel: reviewModelSpec(request, config),
+    });
+  }
+
+  /**
+   * 熔断记账（FR-34/35）。
+   *
+   * - `infrastructureFailure` 专指评审不可用导致的 deny：它只让该工具失去快路径，
+   *   不计入风险阈值（M5 门禁：不把基础设施失败伪装成风险 deny）。
+   * - 预评分的放行不喂熔断器：它永远不会 deny，没有资格影响"被拒绝的连续性"。
+   * - 触发阈值的那次 deny 自己也带 `terminate`：达到阈值就该结束本轮，而不是等下一次调用。
+   */
+  function applyBreakerAccounting(
+    outcome: DecisionOutcome,
+    toolName: string,
+    config: ResolvedConfig,
+  ): void {
+    if (outcome.source === "classifier") {
+      return;
+    }
+    if (outcome.final === "deny") {
+      const tripped = recordBreakerDeny(
+        deps.runtime.breaker,
+        toolName,
+        config.circuitBreaker,
+        { infrastructureFailure: outcome.verdict === "unavailable" },
+      );
+      if (tripped) {
+        outcome.terminate = true;
+        outcome.reason = `${outcome.reason ?? "调用被拒绝。"} ${BREAKER_REASON}`;
+      }
+      return;
+    }
+    recordBreakerAllow(deps.runtime.breaker, config.circuitBreaker);
+  }
+
+  /** 缓存写入（FR-32）：只接受评审模型给出的确定结论，`unavailable` 与人工/授予结论都不固化。 */
+  function storeCache(
+    outcome: DecisionOutcome,
+    cacheKey: string | undefined,
+    config: ResolvedConfig,
+  ): void {
+    if (cacheKey === undefined || !isCacheable(outcome)) {
+      return;
+    }
+    writeCache(deps.runtime.cache, cacheKey, outcome, config.cache.maxEntries, Date.now);
   }
 
   interface ResolveInput {
@@ -308,17 +451,25 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
     request: DecisionRequest;
     config: ResolvedConfig;
     ctx: ExtensionContext;
+    /** 判定缓存 key；`undefined` 表示本条调用不参与缓存（关闭 / unresolved）。 */
+    cacheKey?: string;
   }
 
   async function resolveOutcome(input: ResolveInput): Promise<DecisionOutcome> {
-    const { call, config, ctx, request } = input;
+    const { call, config, ctx, request, cacheKey } = input;
     const proposed = call.action;
     const surface = call.decisive?.object.surfaces[0] ?? toolSurface(request.toolName);
     const targets = collectTargets(call);
 
     let action = call.action;
     let source: DecisionSource = "policy";
-    let reason = describeReason(call, config);
+    // 规则 / 失败分支给出的判定依据（"命中规则"）。评审会覆写 `reason`，因此单独留一份。
+    const ruleReason = describeReason(call, config);
+    let reason: string | undefined = ruleReason;
+    /** 评审给出的风险评级与理由（"风险点"）。 */
+    let riskText: string | undefined;
+    /** 需要额外解释的判定说明（评审不可用、userBashPolicy.autoReview=false 等）。 */
+    let noteText: string | undefined;
     let matchedPattern = call.decisive?.matchedPattern;
     let reviewerModel: string | undefined;
     let verdict: "allow" | "deny" | "unavailable" | undefined;
@@ -332,6 +483,8 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
       (evaluation) => evaluation.object.unresolved !== undefined,
     );
     const anyDeny = call.evaluations.some((evaluation) => evaluation.action === "deny");
+    // FR-35：本轮被 deny 过的工具失去全部快路径（授权 / 缓存 / 预评分）。
+    const fastPathBlocked = breakerBlocksFastPath(deps.runtime.breaker, request.toolName);
 
     if (config.yoloMode && (action === "ask" || action === "review")) {
       return {
@@ -348,6 +501,7 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
       (action === "ask" || action === "review") &&
       !hasUnresolved &&
       !anyDeny &&
+      !fastPathBlocked &&
       config.sessionGrants.enabled &&
       isCallGranted(grantedObjects, deps.runtime.grants.keys, globOptions)
     ) {
@@ -355,6 +509,43 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
       source = "session-grant";
       reason = "本会话已批准该模式（FR-29）。";
       matchedPattern = undefined;
+    }
+
+    // 缓存（FR-31）：确定性结论的快路径，排在授权之后、评审之前。
+    if (
+      cacheKey !== undefined &&
+      !fastPathBlocked &&
+      (action === "ask" || action === "review")
+    ) {
+      const cached = readCache(deps.runtime.cache, cacheKey, config.cache.ttlMs, Date.now);
+      if (cached !== undefined) {
+        return cached;
+      }
+    }
+
+    // 预评分（FR-36~38）：只用于放行、永不产生 deny；同样受 FR-35 与 unresolved 限制。
+    // 它排在评审之前、缓存之后：缓存是确定性结论，应优先复用。
+    if (
+      config.classifier.enabled &&
+      (action === "ask" || action === "review") &&
+      !hasUnresolved &&
+      !fastPathBlocked &&
+      classifierAllows(
+        deps.runtime.classifier,
+        deps.runtime.callIndex,
+        deps.runtime.authorizationVersion,
+        config.classifier.maxLag,
+      )
+    ) {
+      return {
+        proposed,
+        final: "allow",
+        source: "classifier",
+        reason:
+          "预评分判定最近轨迹为低风险，本次调用走快路径放行（FR-36）：预评分只放行、不拒绝，也不代表已复核该动作。",
+        surface,
+        targets,
+      };
     }
 
     if (action === "review") {
@@ -365,6 +556,11 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
       reviewerModel = reviewed.reviewerModel;
       verdict = reviewed.verdict;
       evidenceRounds = reviewed.evidenceRounds;
+      if (verdict === "allow" || verdict === "deny") {
+        riskText = reviewed.reason;
+      } else if (reviewed.reason !== ruleReason) {
+        noteText = reviewed.reason;
+      }
     }
 
     if (action === "ask") {
@@ -374,7 +570,9 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
         grantedObjects,
         input,
         reason,
-        reviewNote: reviewerModel === undefined ? undefined : reason,
+        rule: ruleReason,
+        risk: riskText ?? describeRisk(call, config),
+        ...(noteText === undefined ? {} : { note: noteText }),
       });
       action = resolved.action;
       source = resolved.source;
@@ -436,10 +634,7 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
       };
     }
 
-    const modelSpec =
-      request.origin === "user_bash"
-        ? (config.userBashPolicy.model ?? config.reviewer.model)
-        : config.reviewer.model;
+    const modelSpec = reviewModelSpec(request, config);
 
     const transcript = config.reviewer.transcript
       ? transcriptFromEntries(ctx.sessionManager.getEntries(), {
@@ -474,16 +669,20 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
     config: ResolvedConfig;
     grantedObjects: readonly PolicyObject[];
     input: ResolveInput;
-    /** 转人工前的理由（命中规则、评审结论或 4.5 的调用级分支）。 */
+    /** 转人工前的理由（命中规则、评审结论或调用级分支）。 */
     reason: string | undefined;
-    /** 评审给出的补充说明（风险门槛转人工时带入对话框）。 */
-    reviewNote?: string;
+    /** 命中规则 / 失败分支的判定依据（FR-42 的"命中规则"）。 */
+    rule: string;
+    /** 风险点（FR-42）。 */
+    risk: string;
+    /** 需要额外解释的判定说明（评审不可用等）。 */
+    note?: string;
   }
 
   async function resolveAsk(
     askInput: ResolveAskInput,
   ): Promise<{ action: "allow" | "deny"; source: DecisionSource; reason: string }> {
-    const { ctx, config, grantedObjects, input, reviewNote, reason } = askInput;
+    const { ctx, config, grantedObjects, input, reason } = askInput;
     // 无 UI 的降级理由要把"为什么走到这里"带上，否则用户看不到触发人工确认的那条规则。
     const lead = reason === undefined || reason.length === 0 ? "" : `${reason} `;
 
@@ -515,17 +714,15 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
     const suggestions = config.sessionGrants.enabled
       ? grantKeysForObjects(grantedObjects).map((key) => formatGrantKey(encodeGrantKey(key)))
       : [];
-    const detail = [
-      reviewNote === undefined ? undefined : `评审说明：${reviewNote}`,
-      describeObjects(input.call, input.facts),
-    ]
-      .filter((line): line is string => line !== undefined && line.length > 0)
-      .join("\n");
+    const targets = collectTargets(input.call);
     const decision = await askHuman(ctx, {
-      summary: `工具 ${input.request.toolName} 提议动作 ${input.call.action}，需要确认。\n目标：${collectTargets(
-        input.call,
-      ).join(", ")}`,
-      detail,
+      action: `工具 ${input.request.toolName}，规则层提议动作 ${input.call.action}；目标：${
+        targets.length === 0 ? "（无）" : targets.join("、")
+      }`,
+      rule: askInput.rule,
+      risk: askInput.risk,
+      ...(askInput.note === undefined ? {} : { note: askInput.note }),
+      suggestion: askSuggestion(input.call),
       suggestions,
     });
 
@@ -579,6 +776,8 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
           return undefined;
         }
         return {
+          // `terminate` 只在一次调用里生效（FR-34）：触发熔断或被熔断拦下时提前结束本轮。
+          ...(outcome.terminate === true ? { terminate: true } : {}),
           block: true,
           reason: outcome.reason ?? "被 pi-permission-guardian 拦截。",
         };
@@ -642,7 +841,38 @@ function describeReason(call: CallEvaluation, config: ResolvedConfig): string {
   }
 }
 
-/** 逐对象摘要：既用于人工提示，也作为评审的 facts 摘要（FR-20）。 */
+/**
+ * 风险点（FR-42 的对话框要素）。
+ *
+ * 没有评审结论时也要回答"为什么这条命令有风险"：要么来自调用级分支（不可静态确定、动作冲突），
+ * 要么来自`命中并要求逐次确认的规则`本身。
+ */
+function describeRisk(call: CallEvaluation, config: ResolvedConfig): string {
+  switch (call.cause) {
+    case "unresolved-deny":
+      return "同一调用中同时存在无法静态确定的对象与明确拒绝的对象：静态分析看不到的部分无法保证无害（FR-61）。";
+    case "mixed":
+      return `同一调用的多个命令单元动作冲突，按 onMixedCommandActions=${config.onMixedCommandActions} 处理：被拒绝的动作可能被夹带在允许的动作里（FR-59）。`;
+    case "unresolved":
+      return "调用无法静态确定执行内容（解析失败、包装器内部不可见或路径不可静态确定）：静态分析看不到的写法正是绕过风险所在（FR-14）。";
+    default: {
+      const pattern = call.decisive?.matchedPattern;
+      return pattern === undefined
+        ? "该调用需要人工判断，护栏没有更具体的风险说明。"
+        : `命中规则 "${pattern}"，该规则要求逐次人工确认。`;
+    }
+  }
+}
+
+/** 护栏建议的动作（FR-42）；无法静态确定的调用给出可执行的替代路径。 */
+function askSuggestion(call: CallEvaluation): string {
+  if (call.evaluations.some((evaluation) => evaluation.object.unresolved !== undefined)) {
+    return "命令内容无法静态确定：请让 agent 改用可直接复核的写法（写明路径与参数），或由你自己执行。";
+  }
+  return "确认目标与影响范围符合你的意图后再放行；不确定时选择「拒绝并说明原因」，让 agent 换一种范围更小的写法。";
+}
+
+/** 逐对象摘要：作为评审的 facts 摘要（FR-20）。 */
 function describeObjects(call: CallEvaluation, facts: Facts): string {
   const lines = call.evaluations.map((evaluation) => {
     const action = evaluation.action ?? "（不表态）";

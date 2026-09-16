@@ -3,6 +3,7 @@ import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { AuditLogger } from "../audit/logger.ts";
 import type { ResolvedConfig } from "../config/merge.ts";
 import type { LayerRules } from "../config/normalize.ts";
+import { breakerCounters } from "../decision/breaker.ts";
 import { bashParserStatus } from "../facts/bash/parser.ts";
 import type { GuardianRuntime } from "./state.ts";
 
@@ -67,10 +68,15 @@ export function createCommandHandler(
       }
       case "grants": {
         const keys = [...deps.runtime.grants.keys];
+        const disabled =
+          deps.runtime.config !== undefined && !deps.runtime.config.sessionGrants.enabled;
+        const prefix = disabled
+          ? "会话授权记忆已在配置中关闭（sessionGrants.enabled=false）；当前展示的是残留键。\n"
+          : "";
         ctx.ui.notify(
           keys.length === 0
-            ? "本会话没有授权记忆"
-            : `本会话授权记忆（${keys.length} 条）：\n${keys
+            ? `${prefix}本会话没有授权记忆`
+            : `${prefix}本会话授权记忆（${keys.length} 条）：\n${keys
                 .map((key) => `- ${key}`)
                 .join("\n")}`,
           "info",
@@ -92,7 +98,7 @@ export function createCommandHandler(
 
 /**
  * 状态栏文本（FR-41）：模式 + 最近一次决策来源。
- * M1 尚无决策来源，因此只显示模式；`yoloMode` 与配置失效都必须显著提示（FR-53）。
+ * `yoloMode` 与配置失效都必须显著提示（FR-53）。
  */
 export function renderStatusBar(runtime: GuardianRuntime): string | undefined {
   if (runtime.config === undefined) {
@@ -108,7 +114,11 @@ export function renderStatusBar(runtime: GuardianRuntime): string | undefined {
   if (runtime.config.degraded) {
     flags.push("配置失效");
   }
-  return flags.length === 0 ? "perm: on" : `perm: on [${flags.join(" ")}]`;
+  const mode = flags.length === 0 ? "perm: on" : `perm: on [${flags.join(" ")}]`;
+  const last = runtime.lastDecision;
+  return last === undefined
+    ? mode
+    : `${mode}｜最近 ${last.toolName} → ${last.final}（${last.source}）`;
 }
 
 /**
@@ -213,9 +223,17 @@ export function renderStatusReport(
   );
   lines.push(`- subagentCoverage：${describeSubagentCoverage(deps)}`);
   lines.push(`- ${describeBashParser()}`);
+  const counters = breakerCounters(runtime.breaker);
   lines.push(
-    `- 计数器：grants ${runtime.grants.keys.size}｜cache ${runtime.cache.entries.size}｜熔断 连续 ${runtime.breaker.consecutiveDenials} / 窗口 ${runtime.breaker.recentDenials}`,
+    `- 计数器：grants ${runtime.grants.keys.size}｜cache ${runtime.cache.entries.size}${
+      config.cache.enabled
+        ? `（TTL ${config.cache.ttlMs}ms / 上限 ${config.cache.maxEntries}）`
+        : "（缓存已关闭）"
+    }｜熔断 连续 ${counters.consecutive} / 窗口 ${counters.recent}${
+      counters.tripped ? "（本轮已触发）" : ""
+    }`,
   );
+  lines.push(`- 降本机制：${describeClassifier(config, runtime)}`);
   lines.push(
     `- 审计日志：${
       deps.audit.isEnabled ? "启用" : "关闭"
@@ -264,6 +282,27 @@ function describeSubagentCoverage(deps: CommandDeps): string {
   return deps.runtime.config?.subagentPolicy.enabled === true
     ? "已识别，启用 subagentPolicy"
     : "已识别，但 subagentPolicy 已关闭，使用父策略";
+}
+
+/**
+ * 预评分状态（FR-36~38）。
+ * 关闭时必须直说"关闭"：它的语义是"先放行、后判定"，静默开启是不能接受的。
+ */
+function describeClassifier(config: ResolvedConfig, runtime: GuardianRuntime): string {
+  if (!config.classifier.enabled) {
+    return "预评分 关闭（默认；开启后只会放行，永不拒绝）";
+  }
+  const model = config.classifier.model ?? config.reviewer.model;
+  const state = runtime.classifier;
+  const latest =
+    state.last !== undefined
+      ? `最近 ${state.last.score}（call#${state.last.callIndex}）`
+      : state.failure !== undefined
+        ? `最近失败：${state.failure.reason}`
+        : "尚无评分";
+  return `预评分 启用 model=${model ?? "（未配置）"} maxLag=${
+    config.classifier.maxLag
+  }｜${latest}`;
 }
 
 /** 一层的规则总条数。 */

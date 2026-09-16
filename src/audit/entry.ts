@@ -17,7 +17,9 @@ export type DecisionSource =
   | "cache"
   | "session-grant"
   | "human"
-  | "circuit-breaker";
+  | "circuit-breaker"
+  /** 非阻塞预评分给出的快路径放行（FR-36）；默认关闭，且只用于放行。 */
+  | "classifier";
 
 export interface DecisionEntry {
   timestamp: string;

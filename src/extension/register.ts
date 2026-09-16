@@ -1,12 +1,18 @@
 import {
   type ExtensionAPI,
   type ExtensionContext,
+  type MessageEndEvent,
+  type ToolResultEvent,
   getAgentDir,
 } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 
 import { AuditLogger } from "../audit/logger.ts";
+import { resetBreaker } from "../decision/breaker.ts";
 import { createDecisionEngine } from "../decision/pipeline.ts";
+import { runClassifier } from "../review/classifier.ts";
+import type { ReviewerRegistry } from "../review/reviewer.ts";
+import { textOfContent } from "../review/transcript.ts";
 import { createCommandHandler } from "./commands.ts";
 import { createSessionController } from "./startup.ts";
 import { createRuntime, type GuardianRuntime } from "./state.ts";
@@ -15,6 +21,7 @@ import { createUserBashController } from "./user-bash.ts";
 export const GUARDIAN_EVENTS = [
   "session_start",
   "before_agent_start",
+  "message_end",
   "turn_start",
   "tool_call",
   "tool_result",
@@ -31,10 +38,6 @@ export interface GuardianDeps {
   now?: () => Date;
   warn?: (message: string) => void;
 }
-
-/** 尚未接入决策的入口：M5 接入熔断器重置与 tool_result 记账。 */
-const inertHandler = (_event: unknown, _ctx: ExtensionContext): undefined =>
-  undefined;
 
 /**
  * 唯一的组合根（architecture §2）。工厂阶段只做注册与构造：
@@ -54,6 +57,7 @@ export function registerGuardian(
     now: deps.now,
     warn: deps.warn,
   });
+  const warn = deps.warn ?? ((message: string): void => console.warn(message));
 
   const controller = createSessionController({
     pi,
@@ -68,6 +72,8 @@ export function registerGuardian(
     runtime,
     audit,
     warn: deps.warn,
+    // 状态栏与 appendEntry 共用同一份结论（M5 门禁）：两个入口不再各自拼装观测字段。
+    onDecision: (_outcome, ctx) => controller.updateStatusBar(ctx),
   });
 
   const userBash = createUserBashController({
@@ -92,16 +98,67 @@ export function registerGuardian(
     },
   });
 
+  /**
+   * 非阻塞预评分调度（FR-36~38）。
+   *
+   * 默认关闭时不发起任何额外模型调用（M5 门禁）；单飞标志在 `runClassifier` 内部，
+   * 这里只做"是否该调度"的判定。返回值永远不参与 `tool_result` 的结果。
+   */
+  function scheduleClassifier(event: ToolResultEvent, ctx: ExtensionContext): void {
+    const config = runtime.config;
+    if (config === undefined || !config.classifier.enabled) {
+      return;
+    }
+    const registry: ReviewerRegistry = {
+      find: (provider, modelId) => ctx.modelRegistry.find(provider, modelId),
+      complete: (model, context, options) =>
+        ctx.modelRegistry.complete(model, context, options),
+    };
+    void runClassifier({
+      state: runtime.classifier,
+      registry,
+      modelSpec: config.classifier.model ?? config.reviewer.model,
+      prompt: {
+        toolName: event.toolName,
+        toolInput: event.input,
+        cwd: ctx.cwd,
+        toolResult: textOfContent(event.content),
+      },
+      callIndex: runtime.callIndex,
+      authorizationVersion: runtime.authorizationVersion,
+      timeoutMs: config.classifier.timeoutMs,
+      ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
+    }).catch((error: unknown) => {
+      warn(
+        `[pi-permission-guardian] 预评分调度失败：${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    });
+  }
+
   pi.on("session_start", (_event, ctx) => {
     userBash.attachContext(ctx);
     userBash.publishClaim();
     return controller.sessionStart(ctx);
   });
-  pi.on("before_agent_start", (_event, ctx) => controller.beforeAgentStart(ctx));
-  // M5 接入熔断器重置与 tool_result 记账。
-  pi.on("turn_start", inertHandler);
+  pi.on("before_agent_start", (event, ctx) => controller.beforeAgentStart(ctx, event));
+  // 会话中途追加的用户消息（steer / followUp）也要参与授权版本（FR-33）。
+  pi.on("message_end", (event: MessageEndEvent) => {
+    const message = event.message as { role?: unknown; content?: unknown } | undefined;
+    if (message?.role !== "user") {
+      return;
+    }
+    controller.recordUserMessage(textOfContent(message.content));
+  });
+  // 熔断器每轮重置（FR-34/35）。
+  pi.on("turn_start", () => {
+    resetBreaker(runtime.breaker);
+  });
   pi.on("tool_call", (event, ctx) => engine.handleToolCall(event, ctx));
-  pi.on("tool_result", inertHandler);
+  pi.on("tool_result", (event, ctx) => {
+    scheduleClassifier(event, ctx);
+  });
   pi.on("user_bash", (event, ctx) => userBash.handler(event, ctx));
   pi.on("session_shutdown", async (_event, ctx) => {
     userBash.attachContext(undefined);

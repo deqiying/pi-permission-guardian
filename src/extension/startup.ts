@@ -1,13 +1,18 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type {
+  BeforeAgentStartEvent,
+  ExtensionAPI,
+  ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 
 import { STATUS_BAR_KEY } from "../audit/entry.ts";
 import type { AuditLogger } from "../audit/logger.ts";
 import { loadConfig } from "../config/load.ts";
 import type { ResolvedConfig } from "../config/merge.ts";
 import { auditLogDir } from "../config/paths.ts";
+import { authorizationFingerprint } from "../decision/cache.ts";
 import { disposeBashParser, warmupBashParser } from "../facts/bash/parser.ts";
 import { renderStatusBar } from "./commands.ts";
-import { type GuardianRuntime, resetSessionState } from "./state.ts";
+import { type GuardianRuntime, resetSessionState, updateAuthorizationVersion } from "./state.ts";
 
 /**
  * 生命周期装配（architecture §3）。
@@ -30,8 +35,15 @@ export interface SessionController {
   /** 读盘 → 合并 → 应用到 runtime。`/perm reload` 与 `before_agent_start` 也走这里。 */
   refreshConfig(ctx: ExtensionContext): ResolvedConfig;
   updateStatusBar(ctx: ExtensionContext): void;
+  /**
+   * 记录用户消息文本（FR-33）。指纹变化即清空会话授权与缓存。
+   *
+   * `before_agent_start` 与 `message_end` 都调它：前者给的是本轮的原始 prompt，后者能捕获
+   * 会话中途（steer / followUp）追加的用户消息，两者指纹相同则不会重复清空。
+   */
+  recordUserMessage(text: string): void;
   sessionStart(ctx: ExtensionContext): Promise<void>;
-  beforeAgentStart(ctx: ExtensionContext): void;
+  beforeAgentStart(ctx: ExtensionContext, event: BeforeAgentStartEvent): void;
   sessionShutdown(ctx: ExtensionContext): Promise<void>;
 }
 
@@ -126,6 +138,10 @@ export function createSessionController(
     refreshConfig,
     updateStatusBar,
 
+    recordUserMessage(text: string): void {
+      updateAuthorizationVersion(runtime, authorizationFingerprint(text));
+    },
+
     async sessionStart(ctx: ExtensionContext): Promise<void> {
       runtime.flagEngaged = deps.pi.getFlag("perm") === true;
       resetSessionState(runtime);
@@ -135,7 +151,14 @@ export function createSessionController(
       updateStatusBar(ctx);
     },
 
-    async beforeAgentStart(ctx: ExtensionContext): Promise<void> {
+    async beforeAgentStart(
+      ctx: ExtensionContext,
+      event: BeforeAgentStartEvent,
+    ): Promise<void> {
+      // 用户授权版本（FR-33）：本轮的 prompt 就是"授权前提"。
+      if (typeof event?.prompt === "string") {
+        updateAuthorizationVersion(runtime, authorizationFingerprint(event.prompt));
+      }
       // 支持会话内改配置：重新读盘 + 重新合并。
       refreshConfig(ctx);
       // 预热解析器：让本次会话的第一条 bash 命令不承担 WASM 加载延迟（FR-11）。

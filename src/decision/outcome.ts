@@ -29,6 +29,13 @@ export interface DecisionOutcome {
   verdict?: "allow" | "deny" | "unavailable";
   /** 评审自行查证所用的轮数（FR-24）。 */
   evidenceRounds?: number;
+  /**
+   * 是否要求宿主提前结束本轮（FR-34 的熔断）。
+   *
+   * 只有 `tool_call` 的返回协议带这个字段（`terminate`）；`user_bash` 没有对应字段，
+   * 适配层会忽略它——用户手输的命令本来就不属于某一轮的 agent 循环。
+   */
+  terminate?: boolean;
 }
 
 /** 给 `deny` 的理由补上反规避条款（FR-26）。 */

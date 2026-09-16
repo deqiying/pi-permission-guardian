@@ -1,33 +1,27 @@
+import type { DecisionSource } from "../audit/entry.ts";
 import type { ResolvedConfig } from "../config/merge.ts";
+import { createBreakerState, resetBreaker, type BreakerState } from "../decision/breaker.ts";
+import { createDecisionCache, type DecisionCache } from "../decision/cache.ts";
+import { createClassifierState, type ClassifierState } from "../review/classifier.ts";
 
 /**
  * 会话级运行时状态（architecture §3）。
  *
  * 全部是内存态：`session_shutdown` 清空，`/reload` 后重建，不落盘。
- * 这里只放 M1 需要的骨架与容器；授权键生成（M3）、缓存 key/TTL（M5）、
- * 熔断阈值判定（M5）等逻辑各自在自己的里程碑实现，共用这些容器。
+ * 容器与清空语义集中在这里，具体判定（缓存 key/TTL、熔断阈值、评分滞后）各自在自己的模块里：
+ * `decision/cache.ts`、`decision/breaker.ts`、`review/classifier.ts`。
  */
 
-/** 会话授权记忆（FR-29）。只有人工确认才能写入，键的生成规则在 M3。 */
+/** 会话授权记忆（FR-29）。只有人工确认才能写入，键的生成规则在 `policy/session-grants.ts`。 */
 export interface SessionGrants {
   keys: Set<string>;
 }
 
-/** 判定缓存（FR-31~33）。key 组成与 TTL 淘汰在 M5，这里只保留容器与清空语义。 */
-export interface DecisionCache {
-  entries: Map<string, unknown>;
-}
-
-/** 熔断器计数（FR-34/35）。阈值判定与每轮重置在 M5。 */
-export interface BreakerState {
-  consecutiveDenials: number;
-  recentDenials: number;
-}
-
-/** 非阻塞预评分状态（FR-36~38）。默认关闭。 */
-export interface ClassifierState {
-  lastScore?: "low" | "high" | "failure";
-  lastCallIndex?: number;
+/** 最近一次决策（FR-41 的状态栏来源显示）。 */
+export interface LastDecision {
+  final: "allow" | "deny";
+  source: DecisionSource;
+  toolName: string;
 }
 
 export interface GuardianRuntime {
@@ -45,17 +39,21 @@ export interface GuardianRuntime {
    * 已解析的配置。
    *
    * `undefined` 表示本会话尚未成功加载配置（会话未启动，或加载过程抛出异常）。
-   * M3 的决策入口遇到 `undefined` 必须按 fail-closed 处理，不能当成"未安装护栏"放行。
+   * 决策入口遇到 `undefined` 必须按 fail-closed 处理，不能当成"未安装护栏"放行。
    */
   config: ResolvedConfig | undefined;
   /** 每次成功刷新配置后自增，供缓存 key 失效（FR-31）与 `/perm status` 观察。 */
   configVersion: number;
+  /** 用户消息文本指纹（FR-33）；变化即清空授权记忆与缓存。 */
+  authorizationVersion: string;
   grants: SessionGrants;
   cache: DecisionCache;
   breaker: BreakerState;
   /** 单调递增的调用序号，供预评分滞后判定（FR-37）。 */
   callIndex: number;
   classifier: ClassifierState;
+  /** 最近一次决策结果，供状态栏显示来源（FR-41）。 */
+  lastDecision: LastDecision | undefined;
   /** 当前会话是否是已识别的子代理会话（M6 写入）。 */
   isSubagentSession: boolean;
   /** 检测到其他 `user_bash` 拦截器声明（M4 写入）。 */
@@ -71,11 +69,13 @@ export function createRuntime(): GuardianRuntime {
     gateOverride: undefined,
     config: undefined,
     configVersion: 0,
+    authorizationVersion: "",
     grants: { keys: new Set<string>() },
-    cache: { entries: new Map<string, unknown>() },
-    breaker: { consecutiveDenials: 0, recentDenials: 0 },
+    cache: createDecisionCache(),
+    breaker: createBreakerState(),
     callIndex: 0,
-    classifier: {},
+    classifier: createClassifierState(),
+    lastDecision: undefined,
     isSubagentSession: false,
     userBashConflict: false,
   };
@@ -85,12 +85,32 @@ export function createRuntime(): GuardianRuntime {
 export function resetSessionState(runtime: GuardianRuntime): void {
   runtime.engagedOverride = undefined;
   runtime.gateOverride = undefined;
+  runtime.authorizationVersion = "";
   runtime.grants.keys.clear();
   runtime.cache.entries.clear();
-  runtime.breaker.consecutiveDenials = 0;
-  runtime.breaker.recentDenials = 0;
+  resetBreaker(runtime.breaker);
   runtime.callIndex = 0;
-  runtime.classifier = {};
+  runtime.classifier = createClassifierState();
+  runtime.lastDecision = undefined;
   runtime.isSubagentSession = false;
   runtime.userBashConflict = false;
+}
+
+/**
+ * 用户消息文本指纹变化时清空"基于旧授权前提"的会话态（FR-33）。
+ *
+ * 授权记忆与缓存都建立在"用户当下要求的是什么"之上：用户追加新指令后，此前基于旧前提的
+ * 判定与授权不能继续生效。返回是否发生了变化。
+ */
+export function updateAuthorizationVersion(
+  runtime: GuardianRuntime,
+  fingerprint: string,
+): boolean {
+  if (fingerprint === runtime.authorizationVersion) {
+    return false;
+  }
+  runtime.authorizationVersion = fingerprint;
+  runtime.grants.keys.clear();
+  runtime.cache.entries.clear();
+  return true;
 }

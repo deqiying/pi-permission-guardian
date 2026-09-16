@@ -21,7 +21,13 @@ export interface TranscriptLine {
   text: string;
 }
 
-function textOfContent(content: unknown): string {
+/**
+ * 把消息内容摊成纯文本。
+ *
+ * 同时供评审 transcript（FR-20）与授权版本指纹使用：两边看到的都必须是同一份文本，
+ * 否则"用户追加指令"这件事在一侧被看到、在另一侧被忽略。
+ */
+export function textOfContent(content: unknown): string {
   if (typeof content === "string") {
     return content;
   }

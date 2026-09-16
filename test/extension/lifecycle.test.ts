@@ -297,13 +297,29 @@ describe("会话生命周期与 /perm 命令面（M1）", () => {
     expect(lastNotification(ctx)).toContain("已清空");
   });
 
+  it("sessionGrants.enabled=false 时 /perm grants 如实说明已关闭（M5）", async () => {
+    const harness = setup();
+    writeGlobalConfig(
+      harness.workspace,
+      JSON.stringify({ sessionGrants: { enabled: false } }),
+    );
+    const ctx = await startSession(harness);
+
+    await harness.pi.invokeCommand(GUARDIAN_COMMAND, "grants", asCommandContext(ctx));
+
+    expect(lastNotification(ctx)).toContain("sessionGrants.enabled=false");
+  });
+
   it("session_shutdown 清空会话态并释放配置（FR-52 的收尾）", async () => {
     const harness = setup();
     writeGlobalConfig(harness.workspace, REFERENCE_LIKE);
     const ctx = await startSession(harness);
 
     harness.runtime.grants.keys.add("git status");
-    harness.runtime.cache.entries.set("key", {});
+    harness.runtime.cache.entries.set("key", {
+      outcome: { proposed: "deny", final: "deny", source: "policy", targets: [] },
+      storedAt: Date.now(),
+    });
     harness.runtime.breaker.consecutiveDenials = 2;
     harness.runtime.callIndex = 9;
 
@@ -344,14 +360,31 @@ describe("会话生命周期与 /perm 命令面（M1）", () => {
     expect(allowed).toBeUndefined();
   });
 
-  it("尚未接入的入口保持惰性，不产生副作用", async () => {
+  it("turn_start 重置熔断，tool_result 在预评分关闭时不调用模型（M5）", async () => {
     const harness = setup();
     writeGlobalConfig(harness.workspace, REFERENCE_LIKE);
     const ctx = await startSession(harness);
 
-    for (const event of ["turn_start", "tool_result", "user_bash"] as const) {
-      await expect(harness.pi.fire(event, {}, ctx)).resolves.toBeUndefined();
-    }
+    harness.runtime.breaker.consecutiveDenials = 2;
+    harness.runtime.breaker.deniedTools.add("bash");
+    await expect(harness.pi.fire("turn_start", { type: "turn_start" }, ctx)).resolves.toBeUndefined();
+    expect(harness.runtime.breaker.consecutiveDenials).toBe(0);
+    expect(harness.runtime.breaker.deniedTools.size).toBe(0);
+
+    const review = createFakeReview({ responses: [{ text: "low" }] });
+    const classifierCtx = await startSession(harness, {
+      models: review.models,
+      complete: review.complete,
+    });
+    await expect(
+      harness.pi.fire(
+        "tool_result",
+        { type: "tool_result", toolName: "bash", toolCallId: "c1", input: {}, content: [] },
+        classifierCtx,
+      ),
+    ).resolves.toBeUndefined();
+    // classifier.enabled 默认 false：不得发起任何额外模型调用（M5 门禁）。
+    expect(review.calls).toHaveLength(0);
   });
 
   it("/perm off 的会话覆盖能跨配置刷新存活，新会话开始时重置", async () => {
