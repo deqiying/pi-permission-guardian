@@ -259,6 +259,8 @@ echo ok && rm -rf /
 
 跨层合并时，任一层 `enabled=true` 时启用子代理策略；`defaultAction` 按 `deny > ask > review` 取最严格者；任一层 `allowSessionGrants=false` 时子代理都不能创建或使用会话授权。
 
+`yoloMode=true` 仍然只重写 `ask` / `review`（FR-53），因此 `defaultAction` 配成 `deny` 时产生的默认拦截不会被逃生舱放宽：逃生舱的语义是"不再为需要判断的动作停下来"，而不是"忽略一条默认动作"。要整体放行子代理，应改这个字段或把 `subagentPolicy.enabled` 配成 `false`（后者会回到父策略的默认动作矩阵）。
+
 v1 只兼容 `@gotgenes/pi-subagents` v21.7.1。绑定握手与子会话 registry 都放在进程级存储里（父子扩展实例的事件总线是按会话的，不互通）。父会话在 `bound` 后未收到子扩展握手时：有 UI 使用 warning 通知（每个父会话只提示一次），无 UI 写入 `console.warn`，同时为每个受影响的子会话写入 `pi-permission-guardian.subagent-warning.v1` 会话条目，并把 `/perm status` 标为 `unguarded`。未识别（其他子代理实现或父实例未加载护栏）时显示“未识别，使用父策略”。
 
 ## 7. 工作目录
