@@ -2,19 +2,17 @@ import type { Action, GuardianConfig } from "./schema.ts";
 
 /**
  * 配置规范化（FR-3）：把 `path` / `external_directory` 语法糖展开为读写方向键，
- * 并把每层的 `permission` 整理成有序规则表。
+ * 把每层的 `permission` 整理成有序规则表，再合成 baseline 规则表。
  *
  * 保留顺序是关键：同一 surface 内后写的规则覆盖先写的（last-match-wins，FR-5）。
  * 跨层不在这里消除，由 M3 的求值器按"先层内最后命中、再跨层取最严格者"处理（FR-6）。
  *
- * 关于 baseline：默认动作矩阵与 `permission["*"]` 是"没有任何规则命中时的兜底"，**不能**合成为
- * `*` 模式的规则。否则跨层最严格者合并会让兜底 `review` 压过用户在更具体模式上显式写的 `allow`，
- * 直接推翻参考配置未段的"明确放行"。因此这里只输出用户显式写的规则；
- * 兜底顺序、`permission["*"]` 覆盖默认值以及 `degraded` 时的收紧都由 M3 求值器负责（FR-8、FR-51）。
+ * baseline（默认动作矩阵）是**合成出来的规则**，与用户层同表但语义上是兜底层：
+ * 只有当 global / project 都没有命中规则时才参与裁决（见 `buildBaselineRules`）。
  */
 
-/** 规则表的一层来源。baseline 刻意不在这里：见文件头说明。 */
-export type RuleLayer = "global" | "project";
+/** 规则表的一层来源。`baseline` 是合成层，不是用户写的配置。 */
+export type RuleLayer = "baseline" | "global" | "project";
 
 /** 一条可求值规则。`index` 是同层同 surface 内的写入序号，用于 last-match-wins。 */
 export interface RuleEntry {
@@ -156,10 +154,94 @@ export function normalizeLayerRules(
   return { layer, sourcePath, surfaces: normalizePermission(permission) };
 }
 
+/**
+ * 默认动作矩阵（FR-8、architecture §6.4）：surface → 默认动作。
+ *
+ * 只包含"有默认值"的 surface：
+ * - `path_read` / `path_write` **刻意不在表内**。它们是叠加项（专门描述路径约束），
+ *   给它俩定默认值会让每次带路径的调用都被路径面投一票：定 `review` 会直接推翻 `read` 的默认 `allow`，
+ *   不命中就不表态才是正确语义。
+ * - `tool` 是"未识别 / 自定义工具"的哨兵 surface，由 M3 在工具名不在已知工具表时使用。
+ */
+export const DEFAULT_ACTION_MATRIX: ReadonlyArray<readonly [string, Action]> = [
+  ["read", "allow"],
+  ["find", "allow"],
+  ["grep", "allow"],
+  ["ls", "allow"],
+  ["write", "review"],
+  ["edit", "review"],
+  ["bash", "review"],
+  ["powershell", "review"],
+  ["external_directory_read", "review"],
+  ["external_directory_write", "review"],
+  ["tool", "review"],
+];
+
+/** baseline 合成规则的 `reason`：让审计日志与拦截提示能说清"这是默认值，不是我写的规则"。 */
+export const BASELINE_REASON = "默认动作矩阵";
+export const BASELINE_TIGHTENED_REASON = "配置存在失效层，默认动作收紧为 review";
+
+/**
+ * 合成 baseline 规则表（FR-8、FR-51）。
+ *
+ * 为什么是规则而不是"求值器里的兜底分支"：
+ *
+ * 1. 规则表是唯一决策权威（§6.2）：实际生效的东西全在表里，`/perm status`、审计与
+ *    排查都只需要看一张表，不用再记住一段代码里的兜底顺序。
+ * 2. `permission["*"]` 的语义自然成立：它是用户层里的一条 `*` surface 规则，总是能命中，
+ *    因此 baseline 永远不会参与 ⇒ 自动覆盖默认矩阵（§6.4），不需要额外分支。
+ * 3. `degraded` 时的收紧（configuration.md §3）也变成表里的事实：合成时把所有 `allow`
+ *    抬升为 `review`，而不是让求值器记一个"配置有坏层"的开关。
+ *
+ * 但 baseline 是**兜底层，不是普通层**：只有当 global / project 都没命中规则时才参与。
+ * 否则默认值会压过用户的显式决定 —— `permission.bash` 里写 `"rm -rf ./dist": "allow"`
+ * 会被默认矩阵的 `review` 直接推翻，参考配置末段的"明确放行"整段失效。
+ * 跨层取最严格者的意义是"下层不能放宽上层"，不是"默认值能压过用户"。
+ *
+ * 同时也刻意不合成一条 `*` surface 的兜底规则：那会连 `path_read` / `path_write`
+ * 一起兜住，把它们变成永远投票的面。未识别工具由 `tool` 哨兵 rule 负责。
+ *
+ * `index` 即矩阵顺序，同 surface 内不会出现第二条 baseline 规则。
+ */
+export function buildBaselineRules(options: { tightened: boolean }): LayerRules {
+  const surfaces = new Map<string, RuleEntry[]>();
+  for (const [surface, action] of DEFAULT_ACTION_MATRIX) {
+    // 只有真的被抬升（原本 allow）才换 reason：本来就 review 的 surface 没变过，
+    // 给它挂"已收紧"的理由会误异审计日志与提示词。
+    const lifted = options.tightened && action === "allow";
+    surfaces.set(surface, [
+      {
+        pattern: "*",
+        action: lifted ? "review" : action,
+        reason: lifted ? BASELINE_TIGHTENED_REASON : BASELINE_REASON,
+        index: 0,
+      },
+    ]);
+  }
+  return { layer: "baseline", sourcePath: "", surfaces };
+}
+
 /** 规则总数，供 `/perm status` 报告。 */
 export function countRules(rules: readonly LayerRules[]): number {
   let total = 0;
   for (const layer of rules) {
+    if (layer.layer === "baseline") {
+      continue;
+    }
+    for (const entries of layer.surfaces.values()) {
+      total += entries.length;
+    }
+  }
+  return total;
+}
+
+/** baseline 合成规则的条数，供 `/perm status` 与测试报告。 */
+export function countBaselineRules(rules: readonly LayerRules[]): number {
+  let total = 0;
+  for (const layer of rules) {
+    if (layer.layer !== "baseline") {
+      continue;
+    }
     for (const entries of layer.surfaces.values()) {
       total += entries.length;
     }

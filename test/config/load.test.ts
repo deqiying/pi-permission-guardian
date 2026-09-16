@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import { loadConfig } from "../../src/config/load.ts";
+import type { ResolvedConfig } from "../../src/config/merge.ts";
+import { DEFAULT_ACTION_MATRIX, type LayerRules } from "../../src/config/normalize.ts";
 import {
   createWorkspace,
   type TempWorkspace,
@@ -35,6 +37,16 @@ function load(ws: TempWorkspace, projectTrusted = false) {
   return loadConfig({ cwd: ws.cwd, agentDir: ws.agentDir, projectTrusted });
 }
 
+/** 按层名取规则表：baseline 固定在最前，但断言按层名写才不会随顺序变动而失效。 */
+function layerRules(config: ResolvedConfig, layer: LayerRules["layer"]): LayerRules | undefined {
+  return config.rules.find((entry) => entry.layer === layer);
+}
+
+/** 用户层（不含合成 baseline）的层名，按生效顺序。 */
+function userLayerNames(config: ResolvedConfig): string[] {
+  return config.rules.filter((entry) => entry.layer !== "baseline").map((entry) => entry.layer);
+}
+
 describe("配置加载与合并（FR-47/48/51/52）", () => {
   it("两层都不存在时使用默认值，且不报错（不写盘）", () => {
     const ws = newWorkspace();
@@ -47,7 +59,7 @@ describe("配置加载与合并（FR-47/48/51/52）", () => {
     expect(config.enabled).toBe(true);
     expect(config.ruleCount).toBe(0);
     expect(config.degraded).toBe(false);
-    expect(config.rules).toEqual([]);
+    expect(userLayerNames(config)).toEqual([]);
   });
 
   it("全局层加载参考配置：规则展开、顺序与层来源正确", () => {
@@ -58,10 +70,10 @@ describe("配置加载与合并（FR-47/48/51/52）", () => {
 
     expect(config.layers.global.status).toBe("loaded");
     expect(config.degraded).toBe(false);
-    expect(config.rules.map((layer) => layer.layer)).toEqual(["global"]);
+    expect(userLayerNames(config)).toEqual(["global"]);
     expect(config.ruleCount).toBe(2 + 1 + 2); // path 展开到读写两向 + read + bash 两条
 
-    const surfaces = config.rules[0]?.surfaces;
+    const surfaces = layerRules(config, "global")?.surfaces;
     expect([...(surfaces?.get("path_read") ?? [])].map((rule) => rule.pattern)).toEqual([
       "*.env",
     ]);
@@ -83,7 +95,7 @@ describe("配置加载与合并（FR-47/48/51/52）", () => {
     expect(config.layers.project.diagnostics[0]?.message).toContain(
       "项目未受信任",
     );
-    expect(config.rules.map((layer) => layer.layer)).toEqual(["global"]);
+    expect(userLayerNames(config)).toEqual(["global"]);
     expect(config.enabled).toBe(true);
   });
 
@@ -103,7 +115,7 @@ describe("配置加载与合并（FR-47/48/51/52）", () => {
 
     const config = load(ws, true);
 
-    expect(config.rules.map((layer) => layer.layer)).toEqual([
+    expect(userLayerNames(config)).toEqual([
       "global",
       "project",
     ]);
@@ -274,10 +286,10 @@ describe("配置加载与合并（FR-47/48/51/52）", () => {
     );
 
     // 合法字段继续生效（否则用户显式写的 deny 会一起丢失）
-    expect(config.rules[0]?.surfaces.get("read")).toEqual([
+    expect(layerRules(config, "global")?.surfaces.get("read")).toEqual([
       { pattern: "*", action: "review", index: 0 },
     ]);
-    expect(config.rules[0]?.surfaces.get("bash")?.map((rule) => rule.action)).toEqual([
+    expect(layerRules(config, "global")?.surfaces.get("bash")?.map((rule) => rule.action)).toEqual([
       "review",
       "deny",
     ]);
@@ -301,7 +313,7 @@ describe("配置加载与合并（FR-47/48/51/52）", () => {
     expect(diagnostic?.line).toBe(4);
     expect(diagnostic?.snippet).toBe('  "gate": all');
     // 该层不参与合并，但"存在失效层"必须可见
-    expect(config.rules).toEqual([]);
+    expect(userLayerNames(config)).toEqual([]);
     expect(config.enabled).toBe(true);
   });
 
@@ -346,12 +358,12 @@ describe("配置加载与合并（FR-47/48/51/52）", () => {
         diagnostic.message.includes("bash[bad ((]"),
       ),
     ).toBe(true);
-    expect(config.rules[0]?.surfaces.get("bash")?.map((rule) => rule.action)).toEqual([
+    expect(layerRules(config, "global")?.surfaces.get("bash")?.map((rule) => rule.action)).toEqual([
       "review",
       "deny",
     ]);
     // read 的 allow 被抬升，而不是被丢掉
-    expect(config.rules[0]?.surfaces.get("read")).toEqual([
+    expect(layerRules(config, "global")?.surfaces.get("read")).toEqual([
       { pattern: "*", action: "review", index: 0 },
     ]);
   });
@@ -369,7 +381,7 @@ describe("配置加载与合并（FR-47/48/51/52）", () => {
     const config = load(ws);
 
     expect(config.layers.global.status).toBe("degraded");
-    expect(config.rules[0]?.surfaces.get("bash")?.[0]).toMatchObject({
+    expect(layerRules(config, "global")?.surfaces.get("bash")?.[0]).toMatchObject({
       pattern: "x",
       action: "deny",
       reason: "allow",
@@ -402,7 +414,7 @@ describe("配置加载与合并（FR-47/48/51/52）", () => {
     expect(config.layers.project.status).toBe("invalid");
     expect(config.layers.project.diagnostics[0]?.line).toBe(2);
     expect(config.degraded).toBe(true);
-    expect(config.rules.map((layer) => layer.layer)).toEqual(["global"]);
+    expect(userLayerNames(config)).toEqual(["global"]);
     expect(config.ruleCount).toBe(5);
   });
 
@@ -491,9 +503,105 @@ describe("配置加载与合并（FR-47/48/51/52）", () => {
         diagnostic.message.includes("以下条目不合法已被忽略：read"),
       ),
     ).toBe(true);
-    expect(config.rules[0]?.surfaces.has("read")).toBe(false);
-    expect(config.rules[0]?.surfaces.get("bash")).toEqual([
+    expect(layerRules(config, "global")?.surfaces.has("read")).toBe(false);
+    expect(layerRules(config, "global")?.surfaces.get("bash")).toEqual([
       { pattern: "rm *", action: "review", index: 0 },
     ]);
+  });
+});
+
+describe("baseline 合成规则（FR-8、§6.4）", () => {
+  it("固定作为第一层存在，内容与默认动作矩阵一致", () => {
+    const ws = newWorkspace();
+
+    const config = load(ws);
+
+    expect(config.rules[0]?.layer).toBe("baseline");
+    expect(config.baselineRuleCount).toBe(DEFAULT_ACTION_MATRIX.length);
+    expect(config.ruleCount).toBe(0); // baseline 不计入用户规则条数
+    for (const [surface, action] of DEFAULT_ACTION_MATRIX) {
+      expect(config.rules[0]?.surfaces.get(surface)).toEqual([
+        { pattern: "*", action, reason: "默认动作矩阵", index: 0 },
+      ]);
+    }
+  });
+
+  it("不为 path_read / path_write 合成默认规则", () => {
+    // 它们只是叠加项：定默认值会让每次带路径的调用都被路径面投一票，
+    // 定成 review 就直接推翻 read 的默认 allow。
+    const ws = newWorkspace();
+
+    const config = load(ws);
+
+    expect(config.rules[0]?.surfaces.has("path_read")).toBe(false);
+    expect(config.rules[0]?.surfaces.has("path_write")).toBe(false);
+  });
+
+  it("不合成 `*` surface 的兑底规则，未识别工具改用 tool 哨兵", () => {
+    // 一条 `*` 兑底规则会连 path_* 一起兜住，让叠加面变成永远投票。
+    const ws = newWorkspace();
+
+    const config = load(ws);
+
+    expect(config.rules[0]?.surfaces.has("*")).toBe(false);
+    expect(config.rules[0]?.surfaces.get("tool")?.[0]?.action).toBe("review");
+  });
+
+  it("存在失效层时把默认动作里的 allow 抬升为 review（FR-51）", () => {
+    const ws = newWorkspace();
+    // 项目层 JSON 语法错误 ⇒ degraded
+    writeGlobalConfig(ws, JSON.stringify({ permission: { read: "allow" } }));
+    writeProjectConfig(ws, "{ 坏 JSON");
+
+    const config = load(ws, true);
+
+    expect(config.degraded).toBe(true);
+    // 用户显式写的规则不受影响
+    expect(layerRules(config, "global")?.surfaces.get("read")?.[0]?.action).toBe("allow");
+    // 但兑底不再用 allow
+    for (const surface of ["read", "find", "grep", "ls"]) {
+      expect(config.rules[0]?.surfaces.get(surface)?.[0]).toMatchObject({
+        action: "review",
+        reason: "配置存在失效层，默认动作收紧为 review",
+      });
+    }
+    expect(config.rules[0]?.surfaces.get("bash")?.[0]).toMatchObject({
+      // 本来就 review 的 surface 没变过，不该挂“已收紧”的理由
+      action: "review",
+      reason: "默认动作矩阵",
+    });
+  });
+
+  it("失效层里的失败分支开关 allow 也被抬升为 review（FR-51）", () => {
+    const ws = newWorkspace();
+    writeGlobalConfig(
+      ws,
+      JSON.stringify({
+        onReviewUnavailable: "allow",
+        onUnresolvedFacts: "allow",
+        permission: { read: "alloww" },
+      }),
+    );
+
+    const config = load(ws);
+
+    expect(config.layers.global.status).toBe("degraded");
+    // 读不完整的层不可信：它可能原本还写了更严的值
+    expect(config.onReviewUnavailable).toBe("review");
+    expect(config.onUnresolvedFacts).toBe("review");
+  });
+
+  it("`permission[\"*\"]` 是用户层规则，不改变合成的 baseline", () => {
+    // 兑底层的语义让它总是能命中，因此自动覆盖默认矩阵（§6.4），不需要额外分支。
+    const ws = newWorkspace();
+    writeGlobalConfig(ws, JSON.stringify({ permission: { "*": "allow" } }));
+
+    const config = load(ws);
+
+    expect(layerRules(config, "global")?.surfaces.get("*")).toEqual([
+      { pattern: "*", action: "allow", index: 0 },
+    ]);
+    expect(config.rules[0]?.surfaces.get("bash")?.[0]?.action).toBe("review");
+    expect(config.ruleCount).toBe(1);
   });
 });

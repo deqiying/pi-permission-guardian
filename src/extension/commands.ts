@@ -1,6 +1,7 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
 import type { AuditLogger } from "../audit/logger.ts";
+import type { ResolvedConfig } from "../config/merge.ts";
 import type { LayerRules } from "../config/normalize.ts";
 import { bashParserStatus } from "../facts/bash/parser.ts";
 import type { GuardianRuntime } from "./state.ts";
@@ -150,14 +151,24 @@ export function renderStatusReport(
   );
   lines.push(`- yoloMode：${config.yoloMode ? "开（ask/review 全部放行）" : "关"}`);
   lines.push(
-    `- 配置版本：${runtime.configVersion}｜规则总数：${config.ruleCount} 条${
-      config.degraded ? "｜存在失效层" : ""
-    }`,
+    `- 配置版本：${runtime.configVersion}｜规则：用户 ${config.ruleCount} 条 + 合成默认 ${
+      config.baselineRuleCount
+    } 条${config.degraded ? "｜存在失效层（默认动作已收紧）" : ""}`,
   );
+
+  // baseline 不是配置文件，但必须可见：否则用户会不解"为什么没写规则也会被拦"。
+  const baseline = layerRulesOf(config, "baseline");
+  if (baseline !== undefined) {
+    lines.push(
+      `- 合成默认（baseline）：surface ${baseline.surfaces.size} 个｜只在用户层全未命中时参与${
+        config.degraded ? "（已把 allow 收紧为 review）" : ""
+      }`,
+    );
+  }
 
   for (const name of ["global", "project"] as const) {
     const layer = config.layers[name];
-    const rules = config.rules.find((entry) => entry.layer === name);
+    const rules = layerRulesOf(config, name);
     const ruleCount = rules === undefined ? 0 : countLayerRules(rules);
     const label = name === "global" ? "全局配置" : "项目配置";
     lines.push(
@@ -262,4 +273,12 @@ function countLayerRules(rules: LayerRules): number {
     total += entries.length;
   }
   return total;
+}
+
+/** 按层名取规则表。 */
+function layerRulesOf(
+  config: ResolvedConfig,
+  layer: LayerRules["layer"],
+): LayerRules | undefined {
+  return config.rules.find((entry) => entry.layer === layer);
 }

@@ -104,7 +104,9 @@ scripts/generate-schema.ts
 2. 实现全局配置与项目配置路径解析。项目配置只在 `ctx.isProjectTrusted()` 为真时加载。
 3. 实现 JSONC 预处理，替换注释和尾逗号时保留换行，确保校验错误能映射回原文件行号。
 4. 同层规则保持 last-match-wins；跨层动作按 `deny > ask > review > allow` 合并；`onMixedCommandActions` 按 `deny > ask > review` 合并。
-5. 将 `path` 和 `external_directory` 语法糖展开为读写方向键，并合成 baseline 规则。
+5. 将 `path` 和 `external_directory` 语法糖展开为读写方向键，合成 baseline 规则表（默认动作矩阵，§6.4）
+   并放在规则表第一位；`degraded` 时把 baseline 里的 `allow` 抬升为 `review`。baseline 是**兜底层**：
+   只在 global / project 都未命中时才参与裁决（architecture §6.1）。
 6. 项目未受信任时跳过项目层，按全局配置继续并显式提示；配置解析失败时按 FR-51 将该层所有 `allow` 抬升为 `review`，不允许静默放行。
 7. 在 `session_start` 和 `before_agent_start` 刷新配置；在 `session_shutdown` 清理会话态。
 8. 实现 `/perm on|off|status|reload|grants|clear-grants` 和 `--perm` flag。
@@ -210,6 +212,7 @@ src/interact/dialog.ts
 
 1. 定义动作严格度、同层 last-match-wins 和跨层最严格者合并。
 2. 实现 glob 编译与匹配：命令类规则同时匹配命令单元文本与调用级文本（FR-62），路径类规则匹配路径对象，工具类规则匹配工具名，另有 `*` 兜底。
+   层内 last-match-wins、跨层最严格者；**baseline 层只在用户层全未命中时参与**，未识别工具走 `tool` 哨兵 surface。
 3. 每个命令单元或路径对象独立求值，再按调用级规则合并。
 4. 实现固定优先级：`unresolved + trusted deny -> ask`，其次处理 `allow + deny` 的 `onMixedCommandActions`，最后处理普通 `unresolved`。
 5. 会话授权只接受人工对话框确认；模型 allow、缓存、自动审核和用户手输命令本身不能创建 grant。
@@ -220,6 +223,7 @@ src/interact/dialog.ts
 
 - FR-1 至 FR-10、FR-29、FR-30、FR-59、FR-61 全绿。
 - `echo ok && rm -rf /` 不能由第一个 allow 覆盖第二个 deny。
+- **baseline 兑底不得压过用户显式写的 `allow`**：global 层写 `"rm -rf ./dist": "allow"` 时最终必须是 `allow`，而不是默认矩阵的 `review`（baseline 只在用户层全未命中时参与）。
 - `unresolved + deny` 固定为 `ask`，不受 `onUnresolvedFacts` 放宽。
 - 项目层不能放宽全局层的安全底线。
 - 人工会话授权可复用；模型和缓存来源不能创建授权。

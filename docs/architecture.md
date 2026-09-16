@@ -429,19 +429,28 @@ parser.setLanguage(await Language.load(bashWasm));
 ### 6.1 配置合并与规范化
 
 ```
-baseline 合成默认规则
+baseline 合成默认规则（兜底层）
         ↓
 global  config.json（未信任项目时也加载）
         ↓
 project .pi/extensions/.../config.json（仅 ctx.isProjectTrusted() 为真）
         ↓
-─ normalize：语法糖展开（path → path_read + path_write）
+─ normalize：语法糖展开（path → path_read + path_write）+ 合成 baseline 规则
 ─ merge：permission 动作跨层最严格者胜
          onMixedCommandActions：global/default 定义基线，project 仅能收紧
-         其他标量字段上层覆盖
+         其他标量上层覆盖
         ↓
-ResolvedConfig（含可执行规则表）
+ResolvedConfig（含可执行规则表，第一层固定是 baseline）
 ```
+
+**baseline 是合成的规则表，但语义上是兜底层**：只有当 global / project 都没有命中规则时才参与裁决。默认值不得压过用户的显式决定 —— 否则 `permission.bash` 里写的 `"rm -rf ./dist": "allow"`（参考配置末段的"明确放行"）会被默认矩阵的 `review` 直接推翻。跨层取最严格者的意义是"下层不能放宽上层"，不是"默认值能压过用户"。
+
+baseline 的具体内容（`DEFAULT_ACTION_MATRIX`，§6.4）：
+
+- 逐 surface 一条 `*` 规则；`read`/`find`/`grep`/`ls` 为 `allow`，其余为 `review`。
+- `path_read` / `path_write` **刻意不合成**：它们是叠加项（只描述路径约束），定默认值会让每次带路径的调用都被路径面投一票，定成 `review` 就直接推翻 `read` 的默认 `allow`。不命中就不表态。
+- **不合成** `*` surface 的兜底规则（同理会把叠加面一起兜住）；未识别 / 自定义工具由 `tool` 哨兵 surface 负责（§6.4 末行）。
+- 存在失效层（`degraded`）时，合成直接把 `allow` 抬升为 `review`（FR-51、configuration.md §3），不靠求值器额外记一个"配置有坏层"的开关。
 
 失败降级（FR-51）：非 global 层解析失败时，把该层的**所有 `allow` 抬升为 `review`**，并 `notify` 用户。选择 `review` 而非 `ask` 的理由是：配置损坏时不该打断工作流，但也不该静默放行，模型复查正好落在这个区间。
 
@@ -449,7 +458,7 @@ ResolvedConfig（含可执行规则表）
 
 ```ts
 interface CompiledRule {
-  surface: string;            // "bash" | "path_read" | "external_directory_write" | "grep" | "*"
+  surface: string;            // "bash" | "path_read" | "external_directory_write" | "grep" | "*" | "tool"
   matcher: (value: string) => boolean;   // 已编译的 glob 正则
   action: Action;
   reason?: string;
@@ -458,7 +467,11 @@ interface CompiledRule {
 }
 ```
 
-求值：对每个被裁决对象，按 `(surface, layer, index)` 过滤出候选规则，**先按层合并（最严格），层内取最后一条命中**。
+求值：对每个被裁决对象，按 `(surface, layer, index)` 过滤出候选规则，**先按层合并（最严格），层内取最后一条命中**；
+**baseline 层只在没有任何用户层命中时才参与**（它是兜底层，不是普通一层，见 §6.1）。
+
+surface 匹配：`rule.surface === 对象的 surface` 或 `rule.surface === "*"`；
+未识别 / 自定义工具的 surface 用 `tool` 哨兵（同时仍然允许按工具名精确写规则）。
 
 ### 6.3 glob 语义
 
@@ -484,12 +497,17 @@ interface CompiledRule {
 | `read`（read/find/grep/ls） | `allow` | 只读工具的默认风险最低；跨目录读取另由 `external_directory_read` 覆盖 |
 | `write`（write/edit） | `review` | 覆盖是难回滚的操作 |
 | `bash` | `review` | 任意命令 |
+| `powershell` | `review` | 同上：v1 没有解析器，但默认动作不能是 `allow` |
 | `external_directory_read` | `review` | 读取外部目录是本插件要解决的核心场景之一 |
 | `external_directory_write` | `review` | 同上，且方向独立 |
 | `tool`（自定义/MCP 工具） | `review` | 未知语义 |
 | 通用兜底 `permission["*"]` | 未设置时按上表 | — |
 
 `permission["*"]` 一旦设置，则**覆盖上表全部默认**。
+
+实现方式上它不是额外分支：`"*"` 是用户层里的一条 `*` surface 规则，总是能命中，而 baseline 只在用户层全未命中时参与，所以覆盖是兑底层语义的自然结果。
+
+上表由 `buildBaselineRules`（`src/config/normalize.ts`）合成为 baseline 规则表（§6.1）；`path_read` / `path_write` 不在此表内，也不合成 `*` surface 的兑底规则，理由见 §6.1。
 
 ### 6.5 配置样例与字段说明
 

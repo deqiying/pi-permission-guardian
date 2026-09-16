@@ -4,6 +4,8 @@ import {
   mostRestrictiveAction,
 } from "./schema.ts";
 import {
+  buildBaselineRules,
+  countBaselineRules,
   countRules,
   type LayerRules,
   normalizeLayerRules,
@@ -61,7 +63,11 @@ export interface LoadedLayer {
 
 /** 合并结果：单层形态的标量字段 + 每层规则表 + 加载状态。 */
 export interface ResolvedConfig extends Omit<GuardianConfig, "permission"> {
-  /** 上一层覆盖后的规则表，顺序 global → project。 */
+  /**
+   * 生效规则表：第一层固定是合成的 baseline，之后顺序 global → project。
+   *
+   * baseline 是兜底层（用户层全未命中时才参与），不是普通一层，详见 `buildBaselineRules`。
+   */
   rules: LayerRules[];
   layers: Record<ConfigLayerName, LoadedLayer>;
   /**
@@ -71,8 +77,10 @@ export interface ResolvedConfig extends Omit<GuardianConfig, "permission"> {
    * 因为损坏的配置里可能原本存在 `deny` 规则，我们无法读出来。
    */
   degraded: boolean;
-  /** 规则条数，供 `/perm status` 报告。 */
+  /** 用户层（global + project）的规则条数，不含 baseline 合成规则。 */
   ruleCount: number;
+  /** baseline 合成规则条数，供 `/perm status` 分开显示。 */
+  baselineRuleCount: number;
 }
 
 /** 由合并逻辑显式接管、不参与通用深合并的顶层键。 */
@@ -278,13 +286,20 @@ export function mergeLayers(layers: readonly LoadedLayer[]): ResolvedConfig {
         : grantVotes.every((value) => value === true);
   }
 
-  const rules = contributing.map((layer) =>
+  const userRules = contributing.map((layer) =>
     normalizeLayerRules(layer.layer, layer.path, layer.config.permission),
   );
 
   const degraded = layers.some(
     (layer) => layer.status === "degraded" || layer.status === "invalid",
   );
+
+  // baseline 在最前（§6.1 的合成顺序）：表里第一条就是"什么都没有命中时"的兜底，
+  // 但与用户层语义不同 —— 求值器只在用户层全未命中时才让它参与（见 buildBaselineRules）。
+  const rules = [
+    buildBaselineRules({ tightened: degraded }),
+    ...userRules,
+  ];
 
   const { permission: _permission, ...rest } = merged;
 
@@ -294,6 +309,7 @@ export function mergeLayers(layers: readonly LoadedLayer[]): ResolvedConfig {
     layers: layerRecord(layers),
     degraded,
     ruleCount: countRules(rules),
+    baselineRuleCount: countBaselineRules(rules),
   };
 }
 

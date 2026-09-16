@@ -285,10 +285,14 @@ function validSurface(surface: string, value: unknown): boolean {
 }
 
 /**
- * 只抬升 `permission` 规则里的 `allow`。
+ * 抬升一个失效层里的 `allow`：只碰动作取值与这三类位置。
  *
- * 三个失败分支开关不接受 `allow`（见 schema），配成 `allow` 时它们会被逐字段校验直接丢掉并
- * 落回默认值（`deny` / `review` / `deny`）——这比抬升成 `review` 更严格，也是这里不预设它们的理由。
+ * 为什么连三个失败分支开关一起抬升：它们是"放宽护栏"的入口（配 `allow` 等于"评审不可用时放行"），
+ * 而一个读不完整的配置层不可信 —— 它可能原本还写了更严的值。这和 §3 里"未命中规则的默认动作按
+ * 保守侧处理"是同一个理由，因此不区分"规则里的 allow"与"标量里的 allow"。
+ *
+ * `onMixedCommandActions` 与 `subagentPolicy.defaultAction` 的枚举本身不含 `allow`（无放宽能力），
+ * 写错时会被逐字段校验直接丢掉并落回更严格的默认值，因此这里不需要处理。
  */
 function elevateAllows(raw: Record<string, unknown>): Record<string, unknown> {
   const next: Record<string, unknown> = { ...raw };
@@ -296,8 +300,20 @@ function elevateAllows(raw: Record<string, unknown>): Record<string, unknown> {
   if (permission !== undefined) {
     next["permission"] = elevateSurfaceValue(permission);
   }
+  for (const key of FAILURE_BRANCH_KEYS) {
+    if (next[key] === "allow") {
+      next[key] = "review";
+    }
+  }
   return next;
 }
+
+/** 三个失败分支开关：枚举里含 `allow`，因此在失效层里需要抬升。 */
+const FAILURE_BRANCH_KEYS = [
+  "onReviewUnavailable",
+  "onUnresolvedFacts",
+  "onAskWithoutUI",
+] as const;
 
 /**
  * 抬升一个 surface 取值，只碰动作位置：

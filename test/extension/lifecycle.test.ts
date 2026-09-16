@@ -157,6 +157,8 @@ describe("会话生命周期与 /perm 命令面（M1）", () => {
       "总开关",
       "--perm",
       "yoloMode",
+      "合成默认（baseline）",
+      "只在用户层全未命中时参与",
       "全局配置",
       "项目配置",
       "gate：side-effect",
@@ -200,10 +202,13 @@ describe("会话生命周期与 /perm 命令面（M1）", () => {
     await startSession(harness, { projectTrusted: true });
 
     expect(harness.runtime.config?.gate).toBe("all");
-    expect(harness.runtime.config?.rules.map((layer) => layer.layer)).toEqual([
-      "global",
-      "project",
-    ]);
+    expect(
+      harness.runtime.config?.rules
+        .filter((layer) => layer.layer !== "baseline")
+        .map((layer) => layer.layer),
+    ).toEqual(["global", "project"]);
+    // baseline 永远是表中的第一层（§6.1 的合成顺序）
+    expect(harness.runtime.config?.rules[0]?.layer).toBe("baseline");
   });
 
   it("配置损坏时告警并指明行号，且保持 engaged", async () => {
