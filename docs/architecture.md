@@ -239,6 +239,12 @@ gate 决定"哪些工具调用进入规则求值"，**不是**"哪些调用会�
 
 `!!` 只是让 pi 在记录替代结果时保持 `excludeFromContext=true`，安全裁决与 `!` 完全相同。`user_bash` 不受 `gate` 影响，因为 gate 描述的是 Agent 工具面；只要 `userBashPolicy.enabled=true` 就进入管线。评审模型 allow 只能放行当前命令，不能创建会话授权。
 
+共存冲突采用 **best-effort 检测，不强制顺序**：
+
+- 插件在 `session_start` 通过 `pi.events` 发布 `pi-permission-guardian:user-bash-claim`，声明当前实例会处理 `user_bash`；同一进程收到其他相同或兼容声明时设置 `userBashConflict`。
+- 冲突通过一次性 UI warning、`console.warn`（无 UI）和 `/perm status` 提示，不修改扩展加载顺序、不阻止其他 handler、不通过重复接管来“抢回”事件。
+- pi 的 runner 只返回第一个非空 `user_bash` 结果，且公开 API 不提供扩展枚举或 post-user_bash 事件。因此，一个不参与声明且排在前面并提前返回的拦截器无法被可靠观测；这是明确保留的已知边界。
+
 ### 4.1 为什么把 restrictiveness 放在"跨层"而不是"层内"
 
 层内用 **last-match-wins**（后写覆盖先写）是必须的：否则用户无法在一条宽泛的 `rm * → review` 之后写 `rm -rf ./node_modules → allow` 例外。
@@ -515,6 +521,7 @@ try {
 
 - `ctx.modelRegistry.find(provider, modelId): Model | undefined`（`pi-coding-agent/dist/core/model-registry.d.ts:28`）
 - `ctx.modelRegistry.complete(model, context, options): Promise<AssistantMessage>`（同文件 :33）
+- `reviewer.model` 与 `userBashPolicy.model` 只能解析 pi 模型配置文件中的既有模型；网络协议取自解析后的 `Model`，插件不暴露 `api`、`baseUrl`、认证或 headers 覆盖项。
 - `Context = { systemPrompt?, messages, tools? }`（`pi-ai/dist/types.d.ts:389-393`）
 - `options.signal?: AbortSignal`（`pi-ai/dist/types.d.ts:53`）、`temperature`、`maxTokens`、`cacheRetention`
 - **`ToolChoice = "auto" | "none"`**（`pi-ai/dist/types.d.ts:23`）→ 无法强制模型调用 verdict 工具，这是 FR-22 三段式的根本原因
@@ -642,6 +649,7 @@ key = sha256([
 - `extension/subagents.ts` 在进程级 registry 中，通过 `subagents:child:session-created` / `disposed` 按 `sessionId` 标记子会话。该 registry 不能用 `GuardianRuntime` 的会话内 Map 代替，因为父扩展实例注册的事件必须能被随后绑定的子扩展实例读取。
 - 当前 `ctx.sessionManager.getSessionId()` 命中 registry 后启用 `subagentPolicy`。
 - 子扩展在自身 `session_start` 向 `pi.events` 发一个带 `sessionId` 的绑定握手；父实例收到 `subagents:child:bound` 后核对 registry 中是否已有握手。缺失时输出显式告警，覆盖 `excludedExtensionPackages` 把护栏排出的情况。
+- 缺失握手的固定告警合同：有 UI 时 `ctx.ui.notify(..., "warning")`，无 UI 时 `console.warn`；始终调用 `pi.appendEntry("pi-permission-guardian.subagent-warning.v1", { sessionId, parentSessionId, reason: "guard-not-bound" })`，并把父会话 `/perm status` 的 `subagentCoverage` 标为 `unguarded`。
 - 子代理默认动作只能配置为 `deny` / `ask` / `review`，默认 `review`，不能通过该段放宽为 `allow`。
 - `allowSessionGrants=false` 时，子代理既不能使用父会话授权，也不能创建自己的会话授权。
 - 授权、缓存和熔断本来就是会话内存；父子会话不共享。无法识别子代理时必须由 `/perm status` 明确显示"未识别，使用父策略"，不能静默宣称已启用。
@@ -758,7 +766,7 @@ pi install git:github.com/<owner>/pi-permission-guardian@v0.1.0
 
 ### 11.3 安装后自检
 
-`/perm status` 输出应包含：开关状态、gate 覆盖面、评审模型与可用性、`userBashPolicy` 状态、子代理识别与实际策略、tree-sitter 是否就绪、当前配置来源与规则条数、熔断/缓存计数。这份信息同时是验收排查的第一手材料。
+`/perm status` 输出应包含：开关状态、gate 覆盖面、评审模型与可用性、`userBashPolicy` 状态与冲突标记、`subagentCoverage`、tree-sitter 是否就绪、当前配置来源与规则条数、熔断/缓存计数。这份信息同时是验收排查的第一手材料。
 
 ## 12. 测试策略
 
@@ -773,6 +781,8 @@ pi install git:github.com/<owner>/pi-permission-guardian@v0.1.0
 | `audit/logger` | 临时目录 + 可控时钟 | FR-43：跨日切分、14 天保留边界、清理失败不阻塞裁决 |
 | `decision/pipeline` | 注入假 registry（假 `complete`）与假 UI | FR-23、FR-29~FR-38、§9 全部失败分支 |
 | 集成 | 构造假 `ExtensionAPI`/`ExtensionContext`，跑真实管线 | FR-39~FR-42、FR-46、FR-60 |
+| `user_bash` 共存 | 构造两个声明/未声明 claim 的假 handler | FR-60：声明冲突产生提示；不改变 handler 顺序；不可观测的先前拦截有明确测试文档 |
+| `review/model` | 假 registry 中放置不同 `Model.api` | FR-19：使用模型配置协议且不接受插件级协议覆盖 |
 | 手动冒烟 | 在真实 pi 会话中跑 S1~S7 | 交付验收（需求 §10） |
 
 必须存在的**负向测试**（护栏类项目的价值在此）：
@@ -786,6 +796,8 @@ pi install git:github.com/<owner>/pi-permission-guardian@v0.1.0
 7. `!rm -rf /` 的 `user_bash` deny 只返回替代结果，真实命令未执行。
 
 ## 13. 实施里程碑
+
+详细到文件、实现顺序与阶段门禁的执行拆分见 `docs/implementation-plan.md`。
 
 | 里程碑 | 内容 | 完成判据 |
 |---|---|---|
@@ -804,7 +816,7 @@ pi install git:github.com/<owner>/pi-permission-guardian@v0.1.0
 | bash 静态分析的绕过空间 | 护栏被误认为完备，实际存在缺口 | 明确"非沙箱"定位（N1）；`unresolved` 一律降级不放过；负向测试固化 |
 | 评审延迟叠加在关键路径 | 用户感知变卡 | 名单命中路径零模型调用；20s deadline；缓存与授权记忆；预评分（可选） |
 | 弱模型 verdict 质量 | 错放或错拦 | `maxAllowRiskLevel` 门槛（FR-23）；结构化输出（FR-22）；反规避条款 |
-| 子代理实现未发出可识别 lifecycle 或未加载本插件 | 子代理可能不受策略约束 | 文档与 `/perm status` 显式报告识别结果；按实际子代理版本验证加载路径（FR-55/56） |
+| 子代理实现未发出可识别 lifecycle 或未加载本插件 | 子代理可能不受策略约束 | v1 仅兼容 `@gotgenes/pi-subagents` v21.7.1；缺失握手时 UI/日志告警、appendEntry，并将状态标为 `unguarded`（FR-55/56） |
 | `tool_call` handler 成为进程内单点 | 插件异常影响所有工具调用 | 最外层 try/catch 显式返回 block；单元测试覆盖异常路径 |
 | 与 pi 上游 API 演进的耦合 | `complete` 等 API 未在文档中正式条目化 | 用最小 API 面（`find` / `complete`）；`peerDependencies` 声明下限；集成测试用真实 pi 版本 |
-| 与其他 `tool_call` 拦截型扩展共存 | 双重决策或重复弹窗 | 护栏行为全部经 `/perm status` 可观察；README 明确列出已知的同类型扩展及其影响 |
+| 与其他 `tool_call` / `user_bash` 拦截型扩展共存 | 双重决策、重复弹窗，或先前 handler 截获 `user_bash` | 通过声明 claim 做 best-effort 冲突提示并写入 `/perm status`；不强制加载顺序，无法观测的先前拦截明确列为限制 |

@@ -96,7 +96,7 @@ agent 读取 `~/.pi/agent/` 下的会话文件，或写入 `../other-project/` �
 | FR-6 | 跨配置层（全局 / 项目）合并时 **最严格者胜**：`deny > ask > review > allow` | 合并结果有测试；理由见 §7 决策 D5 |
 | FR-7 | 未命中任何规则时按 surface 默认动作裁决（见 FR-8），而非统一兜底 | 默认动作矩阵有测试 |
 | FR-8 | 提供按 surface 的默认动作矩阵，默认值：读取类 `allow`；`write` / `edit` / `bash` / `external_directory` / 未识别工具 `review` | 默认矩阵写入架构文档并在 `defaultAction` 未配置时生效 |
-| FR-9 | 支持"只读命令白名单"：内置一小组高置信命令，命中即 `allow` 免评审；用户显式配置 `workingDirectory.readOnlyCommands` 时以该数组**完整覆盖**内置默认集，配置空数组可关闭默认白名单 | 未配置时使用内置集；显式数组完全替换而非增量合并；白名单内命令不产生模型调用 |
+| FR-9 | 支持"只读命令白名单"：内置集合保持尽可能小且通用，命中即 `allow` 免评审；匹配方式固定为“可执行名 + 参数前缀”，不为特殊选项增加专用例外；用户显式配置 `workingDirectory.readOnlyCommands` 时以该数组**完整覆盖**内置默认集，配置空数组可关闭默认白名单 | 未配置时使用最小内置集；显式数组完全替换而非增量合并；参数前缀匹配有边界用例；白名单内命令不产生模型调用 |
 | FR-10 | 规则可携带 `reason`，在拦截信息中展示 | `deny` 的返回 `reason` 含自定义理由 |
 | FR-59 | 同一 shell 调用的多个命令单元同时得到 `allow` 与 `deny` 时，允许通过 `onMixedCommandActions` 将调用级冲突配置为 `ask` / `review` / `deny` | 三种配置各有测试；默认 `deny`；仅跨命令单元同时出现 `allow` 与 `deny` 时触发，`deny` 与其他非 `allow` 动作组合仍按最严格者裁决 |
 
@@ -121,7 +121,7 @@ agent 读取 `~/.pi/agent/` 下的会话文件，或写入 `../other-project/` �
 
 | 编号 | 需求 | 验收标准 |
 |---|---|---|
-| FR-19 | 评审模型由配置 `reviewer.model` 指定（`provider/model-id` 格式），经 `ctx.modelRegistry.find` 解析；未配置或无法解析即 `unavailable` | 未配置时行为为 `unavailable` 而非默认放行 |
+| FR-19 | 评审模型由配置 `reviewer.model` 指定（`provider/model-id` 格式），只能来自 pi 模型配置文件并经 `ctx.modelRegistry.find` / `complete` 使用；接口协议必须采用解析后 `Model` 自带的配置协议，插件不得自行选择 wire API 或覆盖 `baseUrl`、认证和 headers | 未配置或无法解析时行为为 `unavailable`；测试确认 `openai-responses` 等协议来自模型配置而非插件硬编码 |
 | FR-20 | 评审输入包含：待执行动作原文（置于消息末尾）、工作目录、命中的规则与为何需复查、facts 摘要、受预算约束的会话 transcript、本会话已授予的授权键摘要 | prompt 构造有快照测试 |
 | FR-21 | 评审输出为结构化 verdict：`decision`（`allow` / `deny`）、`riskLevel`（`low`/`medium`/`high`/`critical`）、`userAuthorization`（`unknown`/`low`/`medium`/`high`）、`reversible`（bool）、`rationale`（≤300 字） | 解析器对各种畸形输出有测试 |
 | FR-22 | verdict 获取采用三段式降级：① 优先使用结构化输出能力（`Tool.constrainedSampling` 的 `json_schema`）；② 退化为提示约束 + JSON 文本解析（容忍代码围栏与前后缀）；③ 仍失败即 `unavailable`，**绝不猜成 allow** | 三段各自有用例 |
@@ -179,14 +179,14 @@ agent 读取 `~/.pi/agent/` 下的会话文件，或写入 `../other-project/` �
 | 编号 | 需求 | 验收标准 |
 |---|---|---|
 | FR-54 | 护栏同样作用于子代理会话内部的工具调用，不允许通过派生子代理绕过 | 子代理会话中触发 `deny` 规则时确实被拦截 |
-| FR-55 | 对接 `@gotgenes/pi-subagents` v21.7.1 的 child lifecycle：`session-created` 注册子会话，子扩展于 `session_start` 发送绑定握手，`bound` 校验握手并告警缺失，`disposed` 清理；文档说明该版本子会话默认继承父 extensions，以及 `excludedExtensionPackages` 可能让子会话失去护栏 | 子会话识别测试；未加载护栏时父会话告警；文档记录验证版本 |
+| FR-55 | 对接 `@gotgenes/pi-subagents` v21.7.1 的 child lifecycle：`session-created` 注册子会话，子扩展于 `session_start` 发送绑定握手，`bound` 校验握手并告警缺失，`disposed` 清理；v1 不扩大兼容范围到其他子代理实现。缺少握手时通过 UI/`console.warn` 告警、写 `appendEntry`，并把 `/perm status` 标为 `unguarded` | 子会话识别测试；未加载护栏时产生可见告警、会话条目和状态标记；文档记录唯一验证版本 |
 | FR-56 | 子代理会话与父会话的授权记忆、缓存、熔断互不共享；子代理内策略应可单独配置更保守的默认动作 | 提供 `subagentPolicy`（`enabled`、`defaultAction`、`allowSessionGrants`）；默认 `defaultAction=review`、`allowSessionGrants=false`；文档说明差异 |
 
 ### 6.8 用户直接执行
 
 | 编号 | 需求 | 验收标准 |
 |---|---|---|
-| FR-60 | 支持 `user_bash`：用户输入 `!command` / `!!command` 时复用同一 facts、规则、授权、评审和审计管线；`allow` 交给 pi 正常执行，`deny` 返回替代 `BashResult` 阻止真实执行，`review` 可使用 `userBashPolicy.model`（缺省复用 `reviewer.model`）自动审核；`!!` 仍保持输出不进入模型上下文 | `!` / `!!` 均有测试；deny 时真实命令未执行；review 模型 allow 不创建 grant；`!!` 的替代结果仍不进入上下文 |
+| FR-60 | 支持 `user_bash`：用户输入 `!command` / `!!command` 时复用同一 facts、规则、授权、评审和审计管线；`allow` 交给 pi 正常执行，`deny` 返回替代 `BashResult` 阻止真实执行，`review` 可使用 `userBashPolicy.model`（缺省复用 `reviewer.model`）自动审核；`!!` 仍保持输出不进入模型上下文。检测到其他 `user_bash` 拦截器声明冲突时只提示，不调整加载顺序或强制接管 | `!` / `!!` 均有测试；deny 时真实命令未执行；review 模型 allow 不创建 grant；冲突时会话条目、UI/日志和 `/perm status` 均有提示；未参与声明的先前拦截器属于已知不可观测边界 |
 
 ### 6.9 不确定与明确拒绝的组合
 
@@ -205,7 +205,7 @@ agent 读取 `~/.pi/agent/` 下的会话文件，或写入 `../other-project/` �
 | **D3** | bash 解析采用**完整 tree-sitter-bash AST 解析** | 简单 glob 匹配命令文本存在大量绕过空间（`sudo rm -rf /`、`bash -c '...'`、命令替换）。安全护栏必须建立在"实际会执行什么"之上 |
 | **D4** | 覆盖面：`bash`/`powershell`、`write`/`edit`、`read`/`find`/`grep`/`ls`、`external_directory`、子代理 | `read` 面纳入是因为"外部目录读取"是真实的信息泄露面（`~/.ssh`、`.env`、认证文件），而它不写任何东西，单看写操作面很容易漏掉 |
 | **D5** | 跨层合并用最严格者胜，顺序 **`deny > ask > review > allow`** | `ask` 排在 `review` 之前，因为"用户要求亲自确认"比"交给模型判断"更保守；`review` 让模型有拒绝能力，因此比 `allow` 严格 |
-| **D6** | 评审模型由**配置项指定**，不回退到当前会话模型 | 关键是**审查独立性**：让被审查者用自己的模型批准自己，等于把授权与执行合并到同一主体。未配置即 `unavailable` |
+| **D6** | 评审模型只能来自 pi 模型配置文件，通过 model registry 解析，并沿用该模型配置的接口协议；不回退到当前会话模型 | 审查主体必须独立配置；插件不自行选择 wire API、不覆盖认证/headers，避免配置文件与真实请求协议漂移 |
 | **D7** | 评审不可用时 **fail-closed（默认 `deny`）** | `unavailable` 是基础设施结果，不是安全结论。放行等于让"拔网线"成为绕过手段。配置项 `onReviewUnavailable` 保留逃生舱，但默认最严格 |
 | **D8** | 启用全部降本机制：会话授权记忆、判定缓存、熔断器、审计日志、非阻塞预评分 | 前四项是"减少人工介入开销"的直接手段；预评分因其"先放行、后判定"的实际语义与护栏的保守取向相反，**默认关闭**，由用户显式开启 |
 | **D9** | 交付物分两份：需求文档 + 架构设计文档 | 先对齐"做什么"，再对齐"怎么做"；实施计划另行产出 |
@@ -220,11 +220,11 @@ agent 读取 `~/.pi/agent/` 下的会话文件，或写入 `../other-project/` �
 | **D18** | 跨命令单元的 `allow` / `deny` 冲突不强制固定为 `deny`，新增 `onMixedCommandActions`：默认 `deny`，可配置 `ask` / `review` / `deny` | 同一条 shell 调用可能由多个独立命令单元组成，固定整条拒绝会损失可重建或低风险子操作的执行能力；把冲突消解策略显式配置，同时默认保持原行为。为保证项目配置不能借混合命令放宽全局底线，该字段跨层按 `deny > ask > review` 合并，项目层只能收紧，不能放宽 |
 | **D19** | 项目许可证使用 **Apache License 2.0** | 允许商业使用、修改、分发，并包含明确的专利授权条款；仓库提交完整 `LICENSE`，未来 `package.json` 使用 `"license": "Apache-2.0"` |
 | **D20** | 审计日志按进程本地日期切分，默认保留 14 天，保留期可配置 | 避免单文件无限增长；可通过 `auditLog.retentionDays` 调整；清理失败只告警，不影响工具裁决 |
-| **D21** | 内置一小组高置信只读命令；用户显式配置 `readOnlyCommands` 时完整覆盖内置默认集 | 常见开发命令保持零评审；`[]` 可明确关闭；完整替换避免“默认集悄悄追加用户未审计命令” |
+| **D21** | 内置只读集合保持尽可能小且通用；匹配固定为“可执行名 + 参数前缀”；用户显式配置 `readOnlyCommands` 时完整覆盖内置默认集 | `[]` 可明确关闭；不做特殊选项白名单分支，边界行为保持可解释；完整替换避免默认集悄悄扩张 |
 | **D22** | `unresolved` 与明确 `deny` 同时出现时最终采用 `ask` | 保留对同一调用中高风险意图的人工确认机会；没有明确 `deny` 时仍按 `onUnresolvedFacts` |
 | **D23** | 只有人工确认才能创建会话授权 | 模型 allow、缓存和自动审核都不等于用户授权；避免把模型判断放大为本会话内长期放行 |
-| **D24** | `!command` / `!!command` 纳入 `user_bash` 护栏；`userBashPolicy` 默认开启，自动审核默认开启，模型缺省复用 `reviewer.model` | 用户直接执行不再形成绕过通道；`!!` 与 `!` 只在输出是否进入模型上下文上不同，安全裁决一致 |
-| **D25** | 新增 `subagentPolicy`：子代理默认动作可取 `deny` / `ask` / `review`，默认 `review`，且默认不允许会话授权继承或创建 | 子代理会话与父会话状态隔离，并可用更保守的默认策略运行 |
+| **D24** | `!command` / `!!command` 纳入 `user_bash` 护栏；`userBashPolicy` 默认开启，自动审核默认开启，模型缺省复用 `reviewer.model`；检测到其他拦截器冲突时只提示，不强制顺序 | 用户直接执行不再形成默认绕过通道；共存冲突可见，同时避免插件争抢扩展加载顺序 |
+| **D25** | 新增 `subagentPolicy`：子代理默认动作可取 `deny` / `ask` / `review`，默认 `review`，默认不允许会话授权继承或创建；v1 只兼容 `@gotgenes/pi-subagents` v21.7.1，且护栏缺失时必须告警 | 子代理会话与父会话状态隔离，并可用更保守的默认策略运行；兼容范围与未覆盖风险保持显式 |
 
 ## 8. 约束与已知限制
 

@@ -108,7 +108,7 @@ echo ok && rm -rf /
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `model` | 无 | **使用评审即必填**。格式 `provider/model-id`，须为 pi 已配置 provider 下的模型 |
+| `model` | 无 | **使用评审即必填**。格式 `provider/model-id`，只能引用 pi 模型配置文件中已存在的模型 |
 | `timeoutMs` | `20000` | 单次评审的硬性 deadline（FR-25） |
 | `maxEvidenceRounds` | `3` | 评审模型调用只读证据工具的轮次上限，`0` 关闭证据循环（FR-24） |
 | `evidenceTools` | `true` | 是否允许评审模型用 `read`/`grep`/`find`/`ls` 自行查证 |
@@ -119,6 +119,8 @@ echo ok && rm -rf /
 ### 5.1 为什么 `model` 不回退到当前会话模型
 
 评审模型必须显式配置，未配置时判为 `unavailable` 而不是拿当前会话模型顶上（D6）。理由是**审查独立性**：让被审查者用自己的模型批准自己，等于把授权与执行合并到同一主体，护栏在语义上就不成立了。
+
+模型必须通过 `ctx.modelRegistry.find` 解析，再用 `ctx.modelRegistry.complete` 调用。请求协议沿用模型自身配置的 `api`，插件不提供 `api`、`baseUrl`、认证或 headers 覆盖项，因此实际请求协议不会与 pi 模型配置漂移。
 
 ### 5.2 风险门槛
 
@@ -140,11 +142,13 @@ echo ok && rm -rf /
 |---|---|---|
 | `userBashPolicy.enabled` | `true` | 是否让用户直接执行的命令经过本插件 |
 | `userBashPolicy.autoReview` | `true` | `review` 动作是否自动调用评审模型；关闭时转人工确认 |
-| `userBashPolicy.model` | `null` | 自动审核模型；`null` 表示复用 `reviewer.model` |
+| `userBashPolicy.model` | `null` | 自动审核模型；只能引用 pi 模型配置中的模型，`null` 表示复用 `reviewer.model` |
 
 `user_bash` 与 `tool_call` 复用同一 facts、规则、授权、评审和审计管线，仅最终执行适配不同：`allow` 返回正常 shell 执行，`deny` 返回替代 `BashResult` 并让真实命令不启动，`review` 按本节自动审核。用户直接输入命令本身不创建会话授权；只有人工确认对话框中的"本会话允许此类"才能创建。
 
 跨全局/项目层合并时采用保守方向：任一层 `enabled=true` 时保持拦截；任一层 `autoReview=false` 时转人工确认；`model` 可由更具体的配置覆盖。
+
+共存冲突只检测和提示，不强制。插件通过 `pi.events` 声明自己的 `user_bash` claim；检测到另一声明时在 UI/日志中提示，并在 `/perm status` 标记冲突。不会改变扩展加载顺序，也不会为了抢回事件而重复拦截。pi 当前不暴露扩展枚举，因此对“未声明且排在前面的拦截器”只能记录为不可观测边界。
 
 ## 6. 降本机制
 
@@ -200,6 +204,8 @@ echo ok && rm -rf /
 
 跨层合并时，任一层 `enabled=true` 时启用子代理策略；`defaultAction` 按 `deny > ask > review` 取最严格者；任一层 `allowSessionGrants=false` 时子代理都不能创建或使用会话授权。
 
+v1 只兼容 `@gotgenes/pi-subagents` v21.7.1。父会话在 `bound` 后未收到子扩展握手时：有 UI 使用 warning 通知，无 UI 写入 `console.warn`，同时写入 `pi-permission-guardian.subagent-warning.v1` 会话条目，并把 `/perm status` 标为 `unguarded`。
+
 ## 7. 工作目录
 
 | 字段 | 默认 | 说明 |
@@ -214,12 +220,10 @@ echo ok && rm -rf /
 内置默认集为：
 
 ```text
-pwd, ls, cat, head, tail, wc, file, stat, which, whoami, date, echo,
-git status, git diff, git log, git show, git remote -v,
-node --version, npm --version, pnpm --version, tsc --version
+pwd, ls, cat, head, tail, wc, git status, git diff, git log, git show
 ```
 
-省略 `readOnlyCommands` 时使用内置集；一旦显式配置数组，该数组**完整覆盖**内置集，而不是增量追加。`"readOnlyCommands": []` 可关闭默认白名单。`rg`、`grep`、`find`、`git branch` 等带可选的外部执行或变更形态，不进入高置信内置集，用户可以按项目需要显式加入。
+内置集保持最小和通用，匹配严格使用“可执行名 + 参数前缀”，不为某个选项额外增加分支。省略 `readOnlyCommands` 时使用内置集；一旦显式配置数组，该数组**完整覆盖**内置集，而不是增量追加。`"readOnlyCommands": []` 可关闭默认白名单。`file`、`stat`、`which`、`whoami`、`date`、`echo`、`rg`、`grep`、`find`、`git branch` 及版本查询等命令不进入内置集，用户可以按项目需要显式加入。
 
 ## 8. 规则表 `permission`
 
@@ -318,6 +322,6 @@ node --version, npm --version, pnpm --version, tsc --version
 /perm status
 ```
 
-输出应包含：开关状态、`gate` 覆盖面、评审模型与可用性、tree-sitter 是否就绪、当前配置来源与规则条数、熔断与缓存计数。排查"为什么这条没被拦住"时，从这里开始。
+输出应包含：开关状态、`gate` 覆盖面、评审模型与可用性、`userBashPolicy` 状态与冲突标记、`subagentCoverage`、tree-sitter 是否就绪、当前配置来源与规则条数、熔断与缓存计数。排查"为什么这条没被拦住"时，从这里开始。
 
 决策依据则在审计日志里（`debugLog` 关闭时也有）：`<agentDir>/extensions/pi-permission-guardian/logs/`，记录了每条决策的来源（`policy` / `reviewer` / `cache` / `session-grant` / `human` / `circuit-breaker`）与命中规则。

@@ -130,7 +130,7 @@
           "type": "string",
           "minLength": 3,
           "pattern": "^[^/]+/.+$",
-          "description": "评审模型，格式 \"provider/model-id\"，须为 pi 已配置 provider 下的模型。未配置或无法解析即判为 unavailable（FR-19）。刻意不回退到当前会话模型，以保证审查独立性（D6）。"
+          "description": "评审模型，格式 \"provider/model-id\"，只能引用 pi 模型配置文件中已存在的模型。通过 model registry 解析并使用模型配置的接口协议；插件不接受 api/baseUrl/认证/headers 覆盖。未配置或无法解析即 unavailable（FR-19、D6）。"
         },
         "timeoutMs": {
           "type": "integer",
@@ -189,7 +189,7 @@
           "type": ["string", "null"],
           "default": null,
           "pattern": "^[^/]+/.+$",
-          "description": "user_bash 自动审核模型，格式 provider/model-id；null 表示复用 reviewer.model。"
+          "description": "user_bash 自动审核模型，格式 provider/model-id；只能引用 pi 模型配置中的模型，接口协议使用该模型自己的配置；null 表示复用 reviewer.model。"
         }
       }
     },
@@ -278,7 +278,7 @@
     "subagentPolicy": {
       "type": "object",
       "additionalProperties": false,
-      "description": "子代理会话的保守策略（FR-56）。仅收紧未命中规则的默认动作，不能放宽父配置中的显式规则。",
+      "description": "子代理会话的保守策略（FR-56）。v1 仅对接 @gotgenes/pi-subagents v21.7.1；仅收紧未命中规则的默认动作，不能放宽父配置中的显式规则。",
       "properties": {
         "enabled": {
           "type": "boolean",
@@ -318,23 +318,12 @@
             "head",
             "tail",
             "wc",
-            "file",
-            "stat",
-            "which",
-            "whoami",
-            "date",
-            "echo",
             "git status",
             "git diff",
             "git log",
-            "git show",
-            "git remote -v",
-            "node --version",
-            "npm --version",
-            "pnpm --version",
-            "tsc --version"
+            "git show"
           ],
-          "description": "只读命令白名单（FR-9）：命中即 allow，不产生评审调用。省略时使用内置高置信默认集；显式配置数组时完整覆盖默认集，配置 [] 可关闭。按命令单元的可执行名与参数前缀匹配，例如 \"git status\" 匹配 `git status --short`，不匹配 `git push`。"
+          "description": "只读命令白名单（FR-9）：命中即 allow，不产生评审调用。内置集保持尽可能小且通用，匹配固定为“可执行名 + 参数前缀”，不为特殊选项增加分支。省略时使用内置集；显式配置数组时完整覆盖默认集，配置 [] 可关闭。例如 \"git status\" 匹配 `git status --short`，不匹配 `git push`。"
         }
       }
     },
