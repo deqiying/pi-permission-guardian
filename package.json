@@ -4,6 +4,14 @@
   "description": "Permission guardrail extension for the pi coding agent.",
   "type": "module",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/deqiying/pi-permission-guardian.git"
+  },
+  "homepage": "https://github.com/deqiying/pi-permission-guardian#readme",
+  "bugs": {
+    "url": "https://github.com/deqiying/pi-permission-guardian/issues"
+  },
   "engines": {
     "node": ">=22"
   },
