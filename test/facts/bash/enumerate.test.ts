@@ -41,9 +41,10 @@ async function units(command: string, ctx: FactsContext = context): Promise<Unit
   });
 }
 
+// WASM 首次加载在并行 worker 里可能超过默认 5s hook 超时，显式放宽。
 beforeAll(async () => {
   await ensureBashParser();
-});
+}, 30_000);
 
 afterAll(() => {
   disposeBashParser();

@@ -52,9 +52,10 @@ const corpusLines = readFileSync(`${fixturesDir}corpus.txt`, "utf8")
   .map((line) => line.trimEnd())
   .filter((line) => line.length > 0 && !line.startsWith("#"));
 
+// WASM 首次加载在并行 worker 里可能超过默认 5s hook 超时，显式放宽。
 beforeAll(async () => {
   await ensureBashParser();
-});
+}, 30_000);
 
 afterAll(() => {
   disposeBashParser();
@@ -171,11 +172,35 @@ describe("bash 语料：路径归一与外部目录判定", () => {
 });
 
 describe("bash 语料：platform 语义与宿主无关", () => {
+  const WINDOWS = {
+    cwd: "D:\\proj\\app",
+    platform: "win32" as const,
+    home: "C:\\Users\\u",
+    roots: ["D:\\proj\\app"],
+    readOnlyCommands: [] as string[],
+  };
+
+  it("MSYS 形式的 `/c/...` 在 Windows 语义下归一为盘符路径", async () => {
+    // git-bash 下 `/c/Users/x` 就是 `C:\\Users\\x`：不归一就会变成拼在 cwd 下的假路径，
+    // 用户针对 `C:\\Users\\**` 写的规则会静默失效。
+    const facts = await extractFacts("bash", { command: "rm /c/Users/x/f.txt" }, WINDOWS);
+    const path = facts.commands[0]?.paths[0];
+    expect(path?.raw).toBe("/c/Users/x/f.txt");
+    expect(path?.lexical).toBe("C:\\Users\\x\\f.txt");
+    expect(path?.external).toBe(true);
+  });
+
   it("Windows 语义下盘符路径被识别并归一", async () => {
     const facts = await extractFacts(
       "bash",
       { command: "rm -rf C:/Users/x/f.txt" },
-      { cwd: "D:\\proj\\app", platform: "win32", home: "C:\\Users\\u", roots: ["D:\\proj\\app"], readOnlyCommands: [] },
+      {
+        cwd: "D:\\proj\\app",
+        platform: "win32",
+        home: "C:\\Users\\u",
+        roots: ["D:\\proj\\app"],
+        readOnlyCommands: [],
+      },
     );
     const path = facts.commands[0]?.paths[0];
     expect(path?.raw).toBe("C:/Users/x/f.txt");

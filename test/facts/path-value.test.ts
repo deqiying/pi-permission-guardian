@@ -93,6 +93,37 @@ describe("path-value：Windows 语义", () => {
     expect(isExternal(value, ["D:\\proj\\app"], "win32")).toBe(false);
   });
 
+  it("MSYS / Cygwin 盘符路径归一为 Windows 路径（仅 Windows 语义）", () => {
+    // git-bash 里 `/c/Users/x` 就是 `C:\Users\x`；不归一就会变成拼在 cwd 下的假路径，
+    // 用户针对 `C:\Users\**` 写的规则会静默失效。
+    expect(makePathValue("/c/Users/x/f.txt", WIN).lexical).toBe("C:\\Users\\x\\f.txt");
+    expect(makePathValue("/cygdrive/c/Users/x", WIN).lexical).toBe("C:\\Users\\x");
+    expect(makePathValue("/c", WIN).lexical).toBe("C:\\");
+    expect(makePathValue("/c/", WIN).lexical).toBe("C:\\");
+    // 归一后不再落在 cwd 内，外部目录规则能正常生效。
+    const value = makePathValue("/c/Users/x/f.txt", WIN);
+    expect(isExternal(value, ["D:\\proj\\app"], "win32")).toBe(true);
+  });
+
+  it("MSYS 形状只认单个字母挂载点，且不影响相对形式", () => {
+    expect(makePathValue("c/x", WIN).lexical).toBe("D:\\proj\\app\\c\\x");
+    expect(makePathValue("./c/x", WIN).lexical).toBe("D:\\proj\\app\\c\\x");
+    // UNC 在 Windows 路径实现里本来就是合法绝对路径，不参与盘符归一。
+    expect(makePathValue("//server/share/x", WIN).lexical).toBe("\\\\server\\share\\x");
+  });
+
+  it("UNC 路径不解析真实路径（realpath 会阻塞在网络访问上）", () => {
+    // 这条用例同时也是性能断言：真去 realpath 会对网络位置发起 SMB 访问，
+    // 在 `tool_call` 里卡住几十秒（曾经把本测试压到 5s 超时）。
+    const value = makePathValue("//server/share/x", WIN);
+    expect(value.lexical).toBe("\\\\server\\share\\x");
+    expect(value.canonical).toBeUndefined();
+  });
+
+  it("POSIX 语义下 `/c/…` 是普通绝对路径，不做盘符转换", () => {
+    expect(makePathValue("/c/Users/x", LINUX).lexical).toBe("/c/Users/x");
+  });
+
   it("目标平台与宿主不一致时不解析符号链接（真实路径是宿主属性）", () => {
     const dir = tempDir();
     const value = makePathValue(join(dir, "missing", "x.txt"), {

@@ -47,6 +47,8 @@ rm -rf /*
 rm -- ./a.txt
 rm C:\Users\x\f.txt
 rm "C:\Program Files\app\x.txt"
+# 以下 `/c/...` 在 POSIX 语义下就是普通绝对路径（MSYS 盘符转换只在 Windows 语义下生效，
+# 由 test/facts/bash-corpus.test.ts 的 Windows 用例断言）。
 rm /c/Users/x/f.txt
 FOO=1 rm -rf /tmp/x
 BAR=1 proxy=1 curl https://x

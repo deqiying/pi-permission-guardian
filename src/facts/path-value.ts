@@ -107,12 +107,32 @@ export function makePathValue(raw: string, options: PathValueOptions): PathValue
   if (!isLiteralPathText(raw)) {
     return { raw, lexical: normalizeSeparators(raw, platform) };
   }
-  const lexical = normalizeSeparators(paths.normalize(paths.resolve(cwd, raw)), platform);
+  // MSYS / Cygwin 形式的盘符路径（git-bash 下 `/c/Users/x` 就是 `C:\Users\x`）先归一，
+  // 否则它会变成一个拼在 cwd 下的假路径，用户的显式路径规则（`C:\Users\**`）命不中。
+  const literal = platform === WINDOWS ? msysToWindows(raw) : raw;
+  const lexical = normalizeSeparators(paths.normalize(paths.resolve(cwd, literal)), platform);
   const canonical =
     options.resolveSymlinks === false
       ? undefined
-      : canonicalizeFor(unfoldedAbsolute(cwd, raw, platform), platform);
+      : canonicalizeFor(unfoldedAbsolute(cwd, literal, platform), platform);
   return canonical === undefined ? { raw, lexical } : { raw, lexical, canonical };
+}
+
+/**
+ * MSYS / Cygwin 盘符路径归一（仅 Windows 目标平台）：
+ * `/c/Users/x` → `C:\Users\x`，`/cygdrive/c/x` → `C:\x`，`/c` 与 `/c/` → `C:\`。
+ *
+ * 只认"单个字母的挂载点"这一形状：`c/x`（相对）、`./c/x`、UNC（`//server/share`）都不在这里处理，
+ * 后者在 Windows 路径实现里本来就是合法绝对路径。
+ */
+export function msysToWindows(text: string): string {
+  const match = /^\/(?:cygdrive\/)?([a-zA-Z])(?=\/|$)/.exec(text);
+  if (match === null) {
+    return text;
+  }
+  const rest = text.slice(match[0].length);
+  const drive = `${(match[1] as string).toUpperCase()}:`;
+  return rest.length === 0 || rest === "/" ? `${drive}\\` : `${drive}${rest}`;
 }
 
 /**
@@ -139,8 +159,19 @@ function canonicalizeFor(absolute: string, platform: NodeJS.Platform): string | 
   if (platform !== process.platform) {
     return undefined;
   }
+  if (isUncPath(absolute, platform)) {
+    // UNC（`\\server\share\x`）不解析真实路径：realpath 会对网络位置发起 SMB 访问，
+    // 可能卡住几十秒、而 `tool_call` 里不能阻塞。它本来就不在任何本地根目录内，
+    // 词法形比较已经足够（根目录也可以是 UNC，那时同样按词法比）。
+    return undefined;
+  }
   const native = normalizeSeparators(absolute, platform);
   return canonicalizePath(native) ?? canonicalizePath(normalizeNative(native));
+}
+
+/** Windows UNC 路径（`\\server\share` 与 `//server/share` 两种写法）。 */
+function isUncPath(value: string, platform: NodeJS.Platform): boolean {
+  return platform === WINDOWS && /^[\\/]{2}/.test(value);
 }
 
 function normalizeNative(absolute: string): string {

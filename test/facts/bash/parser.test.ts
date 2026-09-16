@@ -18,9 +18,10 @@ import {
  * - 失败不被缓存成"就绪"——由 extract-degraded 测试覆盖失败分支。
  */
 
+// WASM 首次加载在并行 worker 里可能超过默认 5s hook 超时，显式放宽。
 beforeAll(async () => {
   await ensureBashParser();
-});
+}, 30_000);
 
 afterAll(() => {
   disposeBashParser();

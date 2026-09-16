@@ -416,6 +416,8 @@ parser.setLanguage(await Language.load(bashWasm));
 - **路径双形与外部目录**：`lexical` 用目标平台自己的路径实现（`path.posix` / `path.win32`）计算，与被测平台无关；`canonical` 只在目标平台与宿主一致时解析，且对不存在的写目标用"最近存在祖先的真实路径 + 剩余片段"拼出。
 - **真实路径必须对未折叠的路径做 realpath**：`cat ./link/../shadow` 的词法形折叠成 `<cwd>/shadow`，而内核是**先解析软链接再处理 `..`**。先折叠会让真实形与词法形一起错，并把路径错判成"根目录内"，从而绕过外部目录规则。
 - **有真实形时只信真实形**：两侧都取真实形再比（根目录自己也可能是指向别处的软链接），只在拿不到真实形时退回词法形比较。否则"根内路径 + `..` 穿软链接"会被判成根内。
+- **UNC 路径只做词法归一**：`\\server\share\x` 不解析真实路径——realpath 会对网络位置发起 SMB 访问，可能阻塞数十秒，而 `tool_call` 里不能阻塞。UNC 本来就不在任何本地根目录内，词法形比较足够。
+- **MSYS / Cygwin 盘符路径先归一**（仅 Windows 目标平台）：`/c/Users/x` → `C:\Users\x`、`/cygdrive/c/x` → `C:\x`、`/c` 与 `/c/` → `C:\`。git-bash 下的写操作必须能被 `C:\Users\**` 这类规则命中，否则会静默落到一个拼在 cwd 下的假路径上。只认"单个字母挂载点"：`c/x`（相对）、`./c/x`、UNC（`//server/share`）不做这个转换；POSIX 目标平台下 `/c/...` 就是普通绝对路径。
 - **`roots` 必须是绝对路径**：事实层只有"路径"概念、没有会话 cwd，因此 `allowRoots` 里写相对路径（`../shared-lib`）或 `~`（`~/dev/monorepo`）时，**组装 FactsContext 的一方**（M3 会话层）负责展开为绝对路径。事实层对相对形式的根目录一律不匹配（宁可判为外部）。
 - **realpath 缓存只覆盖单次提取**：缓存跨调用复用会把"当时"的真实路径当成现在的事实（软链接目标变了、文件删了都不会失效），事实层就不再是输入的纯函数。`extractFacts` 入口会清空缓存。
 
@@ -831,7 +833,7 @@ pi install git:github.com/<owner>/pi-permission-guardian@v0.1.0
 
 | 层 | 手段 | 覆盖目标 |
 |---|---|---|
-| `facts/bash` | 语料库驱动：`test/fixtures/*.txt` 每行一条命令 + 期望 facts（JSON） | FR-11~FR-15。语料必须包含：管道、`&&`、命令替换、子 shell、heredoc、`<>`、`sudo`/`xargs`/`bash -c`、变量拼接、Windows 路径与 `/c/...` MSYS 形式 |
+| `facts/bash` | 语料库驱动：`test/fixtures/*.txt` 每行一条命令 + 期望 facts（JSON） | FR-11~FR-15。语料必须包含：管道、`&&`、命令替换、子 shell、heredoc、`<>`、`sudo`/`xargs`/`bash -c`、变量拼接、Windows 路径与 `/c/...` MSYS 形式（语料里的 `/c/...` 按 POSIX 断言"不做转换"；MSYS 转换在 `test/facts/bash-corpus.test.ts` 的 Windows 语义用例里断言） |
 | `facts` 路径 | 表驱动 | FR-16/17，含 Windows 大小写与分隔符、符号链接双形 |
 | `policy` | 纯函数单测 | FR-1~FR-10、FR-59、FR-61，重点是 last-match-wins、跨层最严格者合并、混合命令冲突与 `unresolved + deny -> ask` |
 | `review/verdict` | 输入输出快照 | FR-21/22，覆盖围栏 JSON、前后缀噪声、缺字段、非法枚举值、非 JSON |
