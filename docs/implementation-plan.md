@@ -238,7 +238,9 @@ src/interact/dialog.ts
 ### 主要文件
 
 ```text
+src/review/types.ts
 src/review/prompt.ts
+src/review/transcript.ts
 src/review/verdict.ts
 src/review/evidence.ts
 src/review/reviewer.ts
@@ -250,24 +252,27 @@ src/extension/register.ts
 ### 实现顺序
 
 1. 解析 `provider/model-id`，只通过 `ctx.modelRegistry.find` 解析模型；无法解析直接产生 `unavailable`。
-2. 通过 `ctx.modelRegistry.complete(model, context, options)` 调用；不得自行选择 wire API，也不得覆盖模型配置中的认证、headers 或 baseUrl。
-3. 构造受预算约束的 prompt：待执行动作放在消息末尾，包含 facts、命中规则、cwd、授权摘要和必要 transcript。
-4. verdict 按 `constrainedSampling json_schema`、JSON 文本解析、`unavailable` 三段式降级，任何失败都不能猜成 allow。
-5. 用 `createReadOnlyTools(cwd)` 构建只读证据工具并直接 `execute()`，设置轮次上限和单一 deadline。
-6. 接入 `ctx.signal`，区分 timeout、cancelled、provider-error、invalid-output 和 not-configured。
-7. 模型 allow 仍经过风险门槛；`high` 或 `critical` 转人工 `ask`，`deny` 直接阻断。
+2. 通过 `ctx.modelRegistry.complete(model, context, options)` 调用；不得自行选择 wire API，也不得覆盖模型配置中的认证、headers 或 baseUrl。`ReviewerRegistry` 只声明 `find` / `complete` 两个方法，使这条约束在类型层面成立。
+3. 构造受预算约束的 prompt：待执行动作放在消息末尾，包含 facts、命中规则、cwd、授权摘要和必要 transcript；会话摘要以 **`[user]` 条目为锚点**分配预算（首条 + 最新一条优先），工具证据另给更小预算，缺失时明说缺失。
+4. verdict 按 `constrainedSampling json_schema`、JSON 文本解析、`unavailable` 三段式降级，任何失败都不能猜成 allow；`strict` 用 `"prefer"`（`"require"` 会在 provider 不支持时让评审直接失败）；缺字段保守回填（`riskLevel` → `high`、`userAuthorization` → `unknown`）。
+5. 用 `createReadOnlyTools(cwd)` 构建只读证据工具，按 `read` / `grep` / `find` / `ls` 白名单过滤后直接 `execute()`；结果截断 4000 字符回喂，并设置轮次上限与**单一 deadline**。
+6. 接入 `ctx.signal`，区分 timeout、cancelled、provider-error、invalid-output 和 not-configured；超时与取消靠标志位而非 `AbortError` 区分。
+7. 模型 allow 仍经过风险门槛（`reviewer.maxAllowRiskLevel`，默认 `medium`）；超过门槛转人工 `ask`，`deny` 直接阻断，`unavailable` 走 `onReviewUnavailable`（其中 `review` 按 deny fail-closed）。
 8. `tool_call` 的 deny 返回 `{ block: true, reason }`；异常路径也必须 fail-closed。
-9. `user_bash` 的 allow 返回 `undefined`，deny 返回替代 `BashResult`，ask 走 UI，review 按 `userBashPolicy` 自动审核。
-10. 发布 `pi-permission-guardian:user-bash-claim` 做 best-effort 共存检测，claim 携带实例 ID，忽略自身事件；冲突只提示，不改变 handler 顺序。
+9. 把管线入口抽象成 `DecisionRequest`（`origin` 区分两个入口），使 `user_bash` 复用同一内核：allow 返回 `undefined`，deny 返回替代 `BashResult`（`{output, exitCode: 1, cancelled: false, truncated: false}`，**不提供 `operations`**）。
+10. `user_bash` 的 `review` 先过 `userBashPolicy.autoReview`（`false` 时不调模型直接转人工），模型解析顺序 `userBashPolicy.model` → `reviewer.model`；事件 cwd 传给 facts 层。
+11. 发布 `pi-permission-guardian:user-bash-claim` 做 best-effort 共存检测，claim 携带实例 ID，订阅在组合阶段就位、忽略自身回声；冲突写一次性提示 + `kind: "user-bash-conflict"` 的 `appendEntry` + `userBashConflict` 状态位，不改变 handler 顺序。
 
 ### 验证门禁
 
-- FR-19 至 FR-28、FR-60 全绿。
-- 不同 `Model.api` 的假 registry 均按模型自身配置调用，插件没有协议覆盖入口。
-- 评审超时、取消、provider 错误、畸形输出都不放行。
-- 评审模型 allow 不创建 grant。
-- `!rm -rf /` 的 deny 不启动真实命令，替代结果在 `!` 与 `!!` 下保持正确的 context 语义。
-- 声明冲突产生一次提示并写入 `/perm status`；未声明且先前返回的非空 handler 记录为不可观测边界。
+- FR-19 至 FR-28、FR-60 全绿（`test/review/` 40 例、`test/decision/review-policy.test.ts` 与管线评审段、`test/extension/user-bash.test.ts` 与生命周期端到端）。
+- 不同 `Model.api` 的假 registry 均按模型自身配置调用，且传给 `complete` 的选项只有 `signal` / `cacheRetention`（无协议与认证覆盖入口）。
+- 评审超时、取消、provider 错误、畸形输出都不放行；`unavailable` 的理由包含"评审未完成"与"不代表该动作因风险被拒绝"。
+- 评审模型 allow 不创建 grant，也不写缓存（缓存属 M5）。
+- 模型 allow 且 `riskLevel` 超过门槛时转人工；`unavailable` 的四种 `onReviewUnavailable` 取值都有用例（含 `review` → deny）。
+- 查证轮次受 `maxEvidenceRounds` 限制，最后一轮强制无工具作答；未知工具调用被拒绝并回喂。
+- `!rm -rf /` 的 deny 返回替代结果且不提供 `operations`，`!` 与 `!!` 的结果完全相等。
+- 声明冲突产生一次提示（UI / console 二选一）、一条会话记录并反映到 `/perm status`；自己的声明不触发提示。
 
 ## 8. M5 降本机制与人工交互
 

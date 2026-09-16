@@ -103,6 +103,15 @@ config 解析失败时 fail-closed：该层的所有 `allow` 抬升为 `review`�
 
 `onReviewUnavailable` 默认 `deny` 的理由：`unavailable` 是基础设施结果，不是安全结论。若放行，等于让"拔网线 / 配错模型名"成为绕过手段。
 
+四个取值的共同语义与各自的边界：
+
+| 取值 | 行为 | 边界 |
+|---|---|---|
+| `deny`（默认） | 拦截 | — |
+| `ask` | 转人工确认 | 无 UI 时再由 `onAskWithoutUI` 接手 |
+| `allow` | 放行 | 理由里显式标明“本次放行由配置决定，不是评审结论” |
+| `review` | 同 `deny` | 评审已经不可用，“再评审一次”不是可执行的落点，因此 fail-closed |
+
 拦截时的提示文案有硬要求（FR-27）：必须说明"评审未完成，不代表因风险被拒"，避免 agent 把基础设施故障学成"这个操作不安全"。
 
 `unresolved` 不能覆盖明确 `deny`：如果同一调用中既有无法静态确定的 facts，又有至少一个可信对象明确命中 `deny`，最终动作固定为 `ask`（FR-61），而不是继续按 `onUnresolvedFacts` 的 `review` 处理。若没有明确 `deny`，才使用 `onUnresolvedFacts`。
@@ -176,6 +185,10 @@ echo ok && rm -rf /
 
 `maxAllowRiskLevel` 就是这个分界线。把它调到 `"low"` 会让更多 allow 转人工；调到 `"high"` 则更信任模型。弱模型给出低质量 allow 的代价是安全侧的单向失败，所以默认不设在最高。
 
+`reviewer.model` 未配置、格式非法、或在 pi 模型配置里找不到时，不算“评审拒绝”，而是 `unavailable` → `onReviewUnavailable`。
+
+模型输出缺字段时按保守方向补齐（FR-21）：**缺 `riskLevel` 的 allow 会被当成 `high`**，于是落到上表的“转为人工确认”一行；缺 `userAuthorization` 当作 `unknown`；`rationale` 缺失时用占位文本，避免审计与拦截理由出现空串。这套回填只影响缺失字段，不会把一个完整的 `deny` 改成别的。
+
 ### 5.3 用户直接执行 `!command` / `!!command`
 
 `!command` 是 pi 交互输入框中的用户直接 shell 命令，命令输出会在下一次模型请求时进入上下文；`!!command` 执行方式相同，但输出不加入模型上下文。两者都会触发 pi 的 `user_bash` 事件。
@@ -186,7 +199,7 @@ echo ok && rm -rf /
 | `userBashPolicy.autoReview` | `true` | `review` 动作是否自动调用评审模型；关闭时转人工确认 |
 | `userBashPolicy.model` | `null` | 自动审核模型；只能引用 pi 模型配置中的模型，`null` 表示复用 `reviewer.model` |
 
-`user_bash` 与 `tool_call` 复用同一 facts、规则、授权、评审和审计管线，仅最终执行适配不同：`allow` 返回正常 shell 执行，`deny` 返回替代 `BashResult` 并让真实命令不启动，`review` 按本节自动审核。用户直接输入命令本身不创建会话授权；只有人工确认对话框中的"本会话允许此类"才能创建。
+`user_bash` 与 `tool_call` 复用同一 facts、规则、授权、评审和审计管线，仅最终执行适配不同：`allow` 返回正常 shell 执行；`deny` 返回替代 `BashResult`（`{output: "<理由>\n", exitCode: 1, cancelled: false, truncated: false}`）并让真实命令不启动；`review` 按本节自动审核。`!!` 与 `!` 的安全裁决与替代结果完全相同（`excludeFromContext` 由 pi 在记录结果时处理，不由插件改写）。用户直接输入命令本身不创建会话授权；只有人工确认对话框中的“本会话允许此类”才能创建。
 
 跨全局/项目层合并时采用保守方向：任一层 `enabled=true` 时保持拦截；任一层 `autoReview=false` 时转人工确认；`model` 可由更具体的配置覆盖。
 
