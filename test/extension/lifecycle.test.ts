@@ -1,12 +1,18 @@
-import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionCommandContext,
+  UserBashEvent,
+  UserBashEventResult,
+} from "@earendil-works/pi-coding-agent";
 
 import { afterEach, describe, expect, it } from "vitest";
 
 import { STATUS_BAR_KEY } from "../../src/audit/entry.ts";
 import { GUARDIAN_COMMAND, GUARDIAN_FLAG, registerGuardian } from "../../src/extension/register.ts";
+import { USER_BASH_CLAIM_CHANNEL } from "../../src/extension/user-bash.ts";
 import type { GuardianRuntime } from "../../src/extension/state.ts";
-import { createFakeCommandContext } from "../support/fake-context.ts";
+import { createFakeCommandContext, type FakeContextOptions } from "../support/fake-context.ts";
 import { createFakePi, type FakePi } from "../support/fake-pi.ts";
+import { createFakeReview, verdictToolCall } from "../support/fake-review.ts";
 import {
   createWorkspace,
   type TempWorkspace,
@@ -50,18 +56,29 @@ function setup(): Harness {
   return { pi, runtime, workspace, warnings };
 }
 
-function context(harness: Harness, options: { projectTrusted?: boolean; models?: Record<string, { api: string }>; hasUI?: boolean } = {}) {
+function context(
+  harness: Harness,
+  options: {
+    projectTrusted?: boolean;
+    models?: Record<string, { api: string }>;
+    hasUI?: boolean;
+    complete?: FakeContextOptions["complete"];
+    entries?: FakeContextOptions["entries"];
+  } = {},
+) {
   return createFakeCommandContext({
     cwd: harness.workspace.cwd,
     projectTrusted: options.projectTrusted ?? false,
     models: options.models,
     hasUI: options.hasUI ?? true,
+    ...(options.complete === undefined ? {} : { complete: options.complete }),
+    ...(options.entries === undefined ? {} : { entries: options.entries }),
   });
 }
 
 async function startSession(
   harness: Harness,
-  options: { projectTrusted?: boolean; models?: Record<string, { api: string }>; hasUI?: boolean } = {},
+  options: Parameters<typeof context>[1] = {},
 ): Promise<ReturnType<typeof createFakeCommandContext>> {
   const ctx = context(harness, options);
   await harness.pi.fire("session_start", SESSION_START, ctx);
@@ -392,5 +409,149 @@ describe("会话生命周期与 /perm 命令面（M1）", () => {
 
     expect(lastNotification(ctx)).toContain("未知子命令");
     expect(ctx.uiCalls.notifications.at(-1)?.type).toBe("warning");
+  });
+});
+
+describe("user_bash 端到端（M4，FR-60）", () => {
+  const USER_BASH_CONFIG = JSON.stringify({
+    gate: "side-effect",
+    reviewer: { model: "test/reviewer", transcript: false, evidenceTools: false },
+    permission: {
+      bash: {
+        "rm -rf /": "deny",
+        "echo *": "allow",
+        "npm *": { action: "review", reason: "安装依赖会改动工作区" },
+      },
+    },
+  });
+
+  function userBash(command: string, excludeFromContext = false): UserBashEvent {
+    return { type: "user_bash", command, excludeFromContext, cwd: "IGNORED" };
+  }
+
+  it("!rm -rf / 被拦截：返回替代执行结果，且不提供 operations（真实命令不会跑）", async () => {
+    const harness = setup();
+    writeGlobalConfig(harness.workspace, USER_BASH_CONFIG);
+    const ctx = await startSession(harness, { hasUI: false });
+
+    const result = (await harness.pi.fire(
+      "user_bash",
+      userBash("rm -rf /"),
+      ctx,
+    )) as UserBashEventResult | undefined;
+
+    expect(result?.result?.exitCode).toBe(1);
+    expect(result?.result?.cancelled).toBe(false);
+    expect(result?.result?.output).toContain("rm -rf /");
+    expect(result?.result?.output).toContain("反规避");
+    expect(result?.operations).toBeUndefined();
+  });
+
+  it("!! 与 ! 的安全裁决与替代结果完全相同（FR-60）", async () => {
+    const harness = setup();
+    writeGlobalConfig(harness.workspace, USER_BASH_CONFIG);
+    const ctx = await startSession(harness, { hasUI: false });
+
+    const bang = (await harness.pi.fire("user_bash", userBash("rm -rf /"), ctx)) as UserBashEventResult;
+    const doubleBang = (await harness.pi.fire(
+      "user_bash",
+      userBash("rm -rf /", true),
+      ctx,
+    )) as UserBashEventResult;
+
+    expect(doubleBang).toEqual(bang);
+  });
+
+  it("未被规则命中的命令不拦截", async () => {
+    const harness = setup();
+    writeGlobalConfig(harness.workspace, USER_BASH_CONFIG);
+    const ctx = await startSession(harness, { hasUI: false });
+
+    await expect(
+      harness.pi.fire("user_bash", userBash("echo hi"), ctx),
+    ).resolves.toBeUndefined();
+  });
+
+  it("review 类命令交给评审模型，allow 后不拦截", async () => {
+    const harness = setup();
+    writeGlobalConfig(harness.workspace, USER_BASH_CONFIG);
+    const review = createFakeReview({
+      responses: [{ toolCalls: [verdictToolCall({ decision: "allow", riskLevel: "low" })] }],
+    });
+    const ctx = await startSession(harness, {
+      hasUI: false,
+      models: review.models,
+      complete: review.complete,
+    });
+
+    await expect(
+      harness.pi.fire("user_bash", userBash("npm install"), ctx),
+    ).resolves.toBeUndefined();
+    expect(review.calls).toHaveLength(1);
+    // 评审提示词要说明来源是用户手输命令（授权前提不同）。
+    expect(JSON.stringify(review.contexts()[0]?.messages)).toContain("来源：用户手输命令");
+  });
+
+  it("userBashPolicy.autoReview=false 时不调用评审模型，转人工（无 UI → deny）", async () => {
+    const harness = setup();
+    writeGlobalConfig(
+      harness.workspace,
+      JSON.stringify({ ...JSON.parse(USER_BASH_CONFIG), userBashPolicy: { autoReview: false } }),
+    );
+    const review = createFakeReview({
+      responses: [{ toolCalls: [verdictToolCall({ decision: "allow" })] }],
+    });
+    const ctx = await startSession(harness, {
+      hasUI: false,
+      models: review.models,
+      complete: review.complete,
+    });
+
+    const result = (await harness.pi.fire(
+      "user_bash",
+      userBash("npm install"),
+      ctx,
+    )) as UserBashEventResult;
+
+    expect(review.calls).toHaveLength(0);
+    expect(result?.result?.exitCode).toBe(1);
+    expect(result?.result?.output).toContain("autoReview=false");
+  });
+
+  it("userBashPolicy.enabled=false 时用户命令完全不经过插件", async () => {
+    const harness = setup();
+    writeGlobalConfig(
+      harness.workspace,
+      JSON.stringify({ ...JSON.parse(USER_BASH_CONFIG), userBashPolicy: { enabled: false } }),
+    );
+    const ctx = await startSession(harness, { hasUI: false });
+
+    await expect(
+      harness.pi.fire("user_bash", userBash("rm -rf /"), ctx),
+    ).resolves.toBeUndefined();
+  });
+
+  it("检测到其他实例的声明后，/perm status 会提示冲突（FR-60）", async () => {
+    const harness = setup();
+    writeGlobalConfig(harness.workspace, USER_BASH_CONFIG);
+    const ctx = await startSession(harness);
+
+    harness.pi.emitOnBus(USER_BASH_CLAIM_CHANNEL, {
+      extension: "pi-permission-guardian",
+      instanceId: "other-instance",
+    });
+    await harness.pi.invokeCommand(GUARDIAN_COMMAND, "status", asCommandContext(ctx));
+
+    expect(harness.runtime.userBashConflict).toBe(true);
+    expect(lastNotification(ctx)).toContain("检测到其他拦截器声明");
+  });
+
+  it("自己的声明不产生冲突提示", async () => {
+    const harness = setup();
+    writeGlobalConfig(harness.workspace, USER_BASH_CONFIG);
+    await startSession(harness);
+
+    expect(harness.runtime.userBashConflict).toBe(false);
+    expect(harness.warnings).toEqual([]);
   });
 });

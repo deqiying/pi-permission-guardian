@@ -23,6 +23,12 @@ export interface DecisionOutcome {
   surface?: string;
   /** 参与裁决的目标主值，写入审计日志。 */
   targets: string[];
+  /** 实际的评审模型（`provider/model-id`），供审计与 `/perm status` 观察（FR-19）。 */
+  reviewerModel?: string;
+  /** 评审结论；`unavailable` 表示评审未完成而不是“因风险被拒”（FR-27）。 */
+  verdict?: "allow" | "deny" | "unavailable";
+  /** 评审自行查证所用的轮数（FR-24）。 */
+  evidenceRounds?: number;
 }
 
 /** 给 `deny` 的理由补上反规避条款（FR-26）。 */

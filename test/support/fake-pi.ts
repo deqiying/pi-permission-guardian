@@ -18,12 +18,16 @@ export interface FakePi {
   flags: Map<string, FlagOptions>;
   /** `pi.appendEntry` 收到的会话内记录（FR-45）。 */
   entries: Array<{ customType: string; data: unknown }>;
+  /** 共存声明频道收到的消息（FR-60）。 */
+  eventBusMessages: Array<{ channel: string; data: unknown }>;
   eventCalls: Array<{
     event: string;
     payload: unknown;
     result: unknown;
   }>;
   fire(event: string, payload: unknown, ctx: ExtensionContext): Promise<unknown>;
+  /** 模拟外部往事件总线发消息（其他扩展的 `user_bash` 声明）。 */
+  emitOnBus(channel: string, data: unknown): void;
   invokeCommand(
     name: string,
     args: string,
@@ -40,13 +44,41 @@ export function createFakePi(): ExtensionAPI & FakePi {
   const flagValues = new Map<string, boolean | string | undefined>();
   const eventCalls: FakePi["eventCalls"] = [];
   const entries: FakePi["entries"] = [];
+  const busHandlers = new Map<string, Array<(data: unknown) => void>>();
+  const eventBusMessages: FakePi["eventBusMessages"] = [];
 
   const fake = {
     handlers,
     commands,
     flags,
     entries,
+    eventBusMessages,
     eventCalls,
+    events: {
+      emit(channel: string, data: unknown): void {
+        eventBusMessages.push({ channel, data });
+        for (const handler of busHandlers.get(channel) ?? []) {
+          handler(data);
+        }
+      },
+      on(channel: string, handler: (data: unknown) => void): () => void {
+        const list = busHandlers.get(channel) ?? [];
+        list.push(handler);
+        busHandlers.set(channel, list);
+        return (): void => {
+          const current = busHandlers.get(channel) ?? [];
+          busHandlers.set(
+            channel,
+            current.filter((entry) => entry !== handler),
+          );
+        };
+      },
+    },
+    emitOnBus(channel: string, data: unknown): void {
+      for (const handler of busHandlers.get(channel) ?? []) {
+        handler(data);
+      }
+    },
     async fire(
       event: string,
       payload: unknown,

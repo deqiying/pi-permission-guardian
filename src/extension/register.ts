@@ -3,12 +3,14 @@ import {
   type ExtensionContext,
   getAgentDir,
 } from "@earendil-works/pi-coding-agent";
+import { randomUUID } from "node:crypto";
 
 import { AuditLogger } from "../audit/logger.ts";
 import { createDecisionEngine } from "../decision/pipeline.ts";
 import { createCommandHandler } from "./commands.ts";
 import { createSessionController } from "./startup.ts";
 import { createRuntime, type GuardianRuntime } from "./state.ts";
+import { createUserBashController } from "./user-bash.ts";
 
 export const GUARDIAN_EVENTS = [
   "session_start",
@@ -30,7 +32,7 @@ export interface GuardianDeps {
   warn?: (message: string) => void;
 }
 
-/** 尚未接入决策的入口：M5 接入熔断器重置，M4 接入 user_bash。 */
+/** 尚未接入决策的入口：M5 接入熔断器重置与 tool_result 记账。 */
 const inertHandler = (_event: unknown, _ctx: ExtensionContext): undefined =>
   undefined;
 
@@ -68,6 +70,17 @@ export function registerGuardian(
     warn: deps.warn,
   });
 
+  const userBash = createUserBashController({
+    pi,
+    runtime,
+    engine,
+    // 实例标识：区分"其他实例的声明"与自己的回声。
+    instanceId: `pi-permission-guardian-${randomUUID().slice(0, 8)}`,
+    warn: deps.warn,
+  });
+  // 订阅在组合阶段就位（早于任何会话），以便捕获后加载的同类扩展在 session_start 发的声明。
+  userBash.watchClaims();
+
   const commandHandler = createCommandHandler({
     runtime,
     audit,
@@ -79,14 +92,21 @@ export function registerGuardian(
     },
   });
 
-  pi.on("session_start", (_event, ctx) => controller.sessionStart(ctx));
+  pi.on("session_start", (_event, ctx) => {
+    userBash.attachContext(ctx);
+    userBash.publishClaim();
+    return controller.sessionStart(ctx);
+  });
   pi.on("before_agent_start", (_event, ctx) => controller.beforeAgentStart(ctx));
-  // M5 接入熔断器重置；M4 接入 user_bash 决策入口。
+  // M5 接入熔断器重置与 tool_result 记账。
   pi.on("turn_start", inertHandler);
   pi.on("tool_call", (event, ctx) => engine.handleToolCall(event, ctx));
   pi.on("tool_result", inertHandler);
-  pi.on("user_bash", inertHandler);
-  pi.on("session_shutdown", (_event, ctx) => controller.sessionShutdown(ctx));
+  pi.on("user_bash", (event, ctx) => userBash.handler(event, ctx));
+  pi.on("session_shutdown", async (_event, ctx) => {
+    userBash.attachContext(undefined);
+    await controller.sessionShutdown(ctx);
+  });
 
   pi.registerCommand(GUARDIAN_COMMAND, {
     description:

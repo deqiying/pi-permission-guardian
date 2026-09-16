@@ -1,7 +1,9 @@
 import type {
   ExtensionCommandContext,
   ExtensionContext,
+  SessionEntry,
 } from "@earendil-works/pi-coding-agent";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 
 export interface FakeUiCalls {
   notifications: Array<{
@@ -11,6 +13,11 @@ export interface FakeUiCalls {
   statuses: Array<{
     key: string;
     text: string | undefined;
+  }>;
+  /** `ui.select` 收到的对话框（标题与选项），供断言人工确认的内文（FR-29/30）。 */
+  selects: Array<{
+    title: string;
+    options: string[];
   }>;
 }
 
@@ -37,6 +44,16 @@ export interface FakeContextOptions {
   inputResult?: string;
   /** 供 `modelRegistry.find` 命中，键为 `provider/model-id`。 */
   models?: Record<string, { api: string }>;
+  /** 会话条目，供评审 transcript 使用（FR-20）。 */
+  entries?: readonly SessionEntry[];
+  /** `modelRegistry.complete` 的实现；缺省直接报错，避免测试意外走到真实评审。 */
+  complete?: (
+    model: unknown,
+    context: unknown,
+    options: unknown,
+  ) => Promise<AssistantMessage>;
+  /** 当前流的中断信号（FR-25）。 */
+  signal?: AbortSignal;
 }
 
 const noop = (): void => {};
@@ -50,6 +67,7 @@ export function createFakeContext(
   const uiCalls: FakeUiCalls = {
     notifications: [],
     statuses: [],
+    selects: [],
   };
   const modelRegistryCalls: FakeModelRegistryCalls = {
     find: [],
@@ -57,7 +75,8 @@ export function createFakeContext(
   };
 
   const ui = {
-    async select(): Promise<string | undefined> {
+    async select(title: string, choices: string[]): Promise<string | undefined> {
+      uiCalls.selects.push({ title, options: choices });
       return options.selectResult;
     },
     async confirm(): Promise<boolean> {
@@ -120,19 +139,23 @@ export function createFakeContext(
     getBranch: (): [] => [],
     buildContextEntries: (): [] => [],
     getHeader: (): undefined => undefined,
-    getEntries: (): [] => [],
+    getEntries: (): readonly SessionEntry[] => options.entries ?? [],
     getTree: (): [] => [],
     getSessionName: (): undefined => undefined,
   };
 
   const modelRegistry = {
-    find(provider: string, modelId: string): { api: string } | undefined {
+    find(provider: string, modelId: string): { provider: string; id: string; api: string } | undefined {
       modelRegistryCalls.find.push({ provider, modelId });
-      return options.models?.[`${provider}/${modelId}`];
+      const entry = options.models?.[`${provider}/${modelId}`];
+      return entry === undefined ? undefined : { provider, id: modelId, api: entry.api };
     },
-    async complete(...args: unknown[]): Promise<never> {
-      modelRegistryCalls.complete.push(args);
-      throw new Error("Fake model registry does not implement complete()");
+    async complete(model: unknown, context: unknown, opts: unknown): Promise<AssistantMessage> {
+      modelRegistryCalls.complete.push([model, context, opts]);
+      if (options.complete === undefined) {
+        throw new Error("Fake model registry does not implement complete()");
+      }
+      return options.complete(model, context, opts);
     },
   };
 
@@ -147,7 +170,7 @@ export function createFakeContext(
     scopedModels: [],
     isIdle: (): boolean => true,
     isProjectTrusted: (): boolean => options.projectTrusted ?? false,
-    signal: undefined,
+    signal: options.signal,
     abort: noop,
     hasPendingMessages: (): boolean => false,
     shutdown: noop,

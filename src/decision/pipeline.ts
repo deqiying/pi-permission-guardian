@@ -29,17 +29,35 @@ import {
   grantKeysForObjects,
   isCallGranted,
 } from "../policy/session-grants.ts";
+import { createEvidenceTools } from "../review/evidence.ts";
+import { requestReview, type ReviewerRegistry } from "../review/reviewer.ts";
+import { transcriptFromEntries } from "../review/transcript.ts";
+import type { ReviewOutcome } from "../review/types.ts";
 import { withAntiCircumvention, type DecisionOutcome } from "./outcome.ts";
+import { applyReviewOutcome } from "./policy.ts";
 
 /**
- * 最小决策管线（M3，architecture §4）。
+ * 决策管线（architecture §4）。
  *
  * 顺序：engaged → classify → facts → gate → rule → grant → review → ask → outcome。
  * - **grant 在 rule 之后**：授权只能把 `ask` / `review` 放宽为 `allow`，永不覆盖 `deny`，
  *   且 `unresolved` 调用不享受授权（用户决策 2026-01，见 docs/architecture.md §4/§8.1）。
- * - **review 在本阶段一律转 `ask`**：评审层是 M4 的事，提前把 review 当成 allow 会静默放行。
+ * - **review 交评审模型**（M4）：结论还要过 FR-23 的风险门槛；评审不可用走 `onReviewUnavailable`。
  * - 缓存与熔断是 M5 的事，这里不预留空壳。
+ *
+ * `tool_call` 与 `user_bash` 共用同一个内核：两个入口只负责把自己的事件形状翻译成
+ * `DecisionRequest`，再把自己的返回协议贴回去，裁决逻辑只有一份。
  */
+
+/** 一次待裁决的调用；两个入口唯一需要对齐的形状。 */
+export interface DecisionRequest {
+  origin: "tool_call" | "user_bash";
+  toolName: string;
+  toolCallId: string;
+  input: unknown;
+  /** 调用自己的工作目录；`user_bash` 用事件里的 cwd，缺省用 `ctx.cwd`。 */
+  cwd?: string;
+}
 
 export interface DecisionEngineDeps {
   pi: ExtensionAPI;
@@ -56,7 +74,12 @@ export interface DecisionEngine {
     event: ToolCallEvent,
     ctx: ExtensionContext,
   ): Promise<ToolCallEventResult | undefined>;
-  /** 只做裁决、不做返回协议映射的入口，供测试与后续入口（M4 user_bash）复用。 */
+  /** `DecisionRequest` 入口；`user_bash` 与测试复用。 */
+  decide(
+    request: DecisionRequest,
+    ctx: ExtensionContext,
+  ): Promise<DecisionOutcome | undefined>;
+  /** `tool_call` 事件 → `DecisionOutcome`，不做返回协议映射。 */
   decideToolCall(
     event: ToolCallEvent,
     ctx: ExtensionContext,
@@ -76,6 +99,21 @@ export function isGated(toolName: string, config: ResolvedConfig): boolean {
   return config.gate === "all";
 }
 
+function expandHomePrefix(value: string, home: string): string {
+  const trimmed = home.replace(/[\\/]+$/, "");
+  for (const prefix of ["~/", "$HOME/", "${HOME}/"]) {
+    if (value.startsWith(prefix)) {
+      return `${trimmed}/${value.slice(prefix.length)}`;
+    }
+  }
+  for (const exact of ["~", "$HOME", "${HOME}"]) {
+    if (value === exact) {
+      return trimmed;
+    }
+  }
+  return value;
+}
+
 /**
  * 把 `workingDirectory.allowRoots` 展开为绝对路径（FR-16 的 facts 契约）。
  *
@@ -92,24 +130,11 @@ export function expandRoots(
   const roots = [cwd];
   for (const root of allowRoots) {
     const expanded = expandHomePrefix(root, home);
-    roots.push(paths.isAbsolute(expanded) ? paths.normalize(expanded) : paths.resolve(cwd, expanded));
+    roots.push(
+      paths.isAbsolute(expanded) ? paths.normalize(expanded) : paths.resolve(cwd, expanded),
+    );
   }
   return roots;
-}
-
-function expandHomePrefix(value: string, home: string): string {
-  const trimmed = home.replace(/[\\/]+$/, "");
-  for (const prefix of ["~/", "$HOME/", "${HOME}/"]) {
-    if (value.startsWith(prefix)) {
-      return `${trimmed}/${value.slice(prefix.length)}`;
-    }
-  }
-  for (const exact of ["~", "$HOME", "${HOME}"]) {
-    if (value === exact) {
-      return trimmed;
-    }
-  }
-  return value;
 }
 
 export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
@@ -136,10 +161,23 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
     return cachedTable;
   }
 
+  /**
+   * 评审层需要的能力面：只给 `find` / `complete`。
+   *
+   * 这个门面同时是"插件不能覆盖 wire 协议、认证、baseUrl"这条约束的类型级落点：
+   * 评审层拿不到 registry 上的其他任何东西。
+   */
+  function registryFacade(ctx: ExtensionContext): ReviewerRegistry {
+    return {
+      find: (provider, modelId) => ctx.modelRegistry.find(provider, modelId),
+      complete: (model, context, options) =>
+        ctx.modelRegistry.complete(model, context, options),
+    };
+  }
+
   function record(
     ctx: ExtensionContext,
-    event: ToolCallEvent,
-    toolName: string,
+    request: DecisionRequest,
     outcome: DecisionOutcome,
     latencyMs: number,
   ): void {
@@ -149,16 +187,19 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
       deps.audit.record({
         ts: new Date().toISOString(),
         sessionId: ctx.sessionManager.getSessionId(),
-        toolCallId: event.toolCallId,
+        toolCallId: request.toolCallId,
         callIndex,
-        toolName,
-        surface: outcome.surface ?? toolSurface(toolName),
+        toolName: request.toolName,
+        surface: outcome.surface ?? toolSurface(request.toolName),
         targets: outcome.targets,
         matchedPattern: outcome.matchedPattern,
         action: outcome.final,
         source: outcome.source,
         latencyMs,
         reason: outcome.reason,
+        model: outcome.reviewerModel,
+        verdict: outcome.verdict,
+        evidenceRounds: outcome.evidenceRounds,
       });
     } catch (error) {
       // 审计只是观测面：写日志失败不能让裁决跟着失败。
@@ -167,12 +208,16 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
     try {
       deps.pi.appendEntry(DECISION_ENTRY_TYPE, {
         timestamp: new Date().toISOString(),
-        toolName,
-        toolCallId: event.toolCallId,
+        origin: request.origin,
+        toolName: request.toolName,
+        toolCallId: request.toolCallId,
         decision: outcome.final,
         source: outcome.source,
-        surface: outcome.surface ?? toolSurface(toolName),
+        surface: outcome.surface ?? toolSurface(request.toolName),
         matchedPattern: outcome.matchedPattern,
+        reviewerModel: outcome.reviewerModel,
+        verdict: outcome.verdict,
+        evidenceRounds: outcome.evidenceRounds,
         reason: outcome.reason,
       });
     } catch (error) {
@@ -181,30 +226,37 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
     }
   }
 
-  async function decideToolCall(
-    event: ToolCallEvent,
+  function failClosed(
+    toolName: string,
+    reason: string,
+  ): DecisionOutcome {
+    return {
+      proposed: "deny",
+      final: "deny",
+      source: "policy",
+      reason: withAntiCircumvention(reason),
+      surface: toolSurface(toolName),
+      targets: [],
+    };
+  }
+
+  async function decide(
+    request: DecisionRequest,
     ctx: ExtensionContext,
   ): Promise<DecisionOutcome | undefined> {
     if (!deps.runtime.engaged) {
       return undefined;
     }
-    const toolName = event.toolName;
+    const { toolName } = request;
     if (typeof toolName !== "string" || toolName.length === 0) {
       return undefined;
     }
 
     const config = deps.runtime.config;
     if (config === undefined) {
-      // FR：runtime.config 为 undefined 表示本会话尚未成功加载配置，必须 fail-closed，
+      // `runtime.config` 为 undefined 表示本会话尚未成功加载配置，必须 fail-closed，
       // 不能当成"未安装护栏"而放行（extension/state.ts 的既有契约）。
-      return {
-        proposed: "deny",
-        final: "deny",
-        source: "policy",
-        reason: withAntiCircumvention("配置尚未加载，按 fail-closed 拦截。"),
-        surface: toolSurface(toolName),
-        targets: [],
-      };
+      return failClosed(toolName, "配置尚未加载，按 fail-closed 拦截。");
     }
 
     if (!isGated(toolName, config)) {
@@ -212,72 +264,74 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
     }
 
     const started = Date.now();
+    // 命令实际执行的工作目录可能不同于会话 cwd（`user_bash` 事件自带 cwd）。
+    const cwd = request.cwd ?? ctx.cwd;
     const factsContext: FactsContext = {
-      cwd: ctx.cwd,
+      cwd,
       platform,
       home,
-      roots: expandRoots(ctx.cwd, config.workingDirectory.allowRoots, home, platform),
+      roots: expandRoots(cwd, config.workingDirectory.allowRoots, home, platform),
       readOnlyCommands: config.workingDirectory.readOnlyCommands,
     };
 
     let facts: Facts;
     let call: CallEvaluation;
     try {
-      facts = await extractFacts(toolName, event.input, factsContext);
+      facts = await extractFacts(toolName, request.input, factsContext);
       call = evaluateCall({ facts, toolName, config, table: ruleTable(config) });
     } catch (error) {
       // §9 最后一行：插件内部异常必须显式阻断，不能依赖 pi"handler 抛错即阻断"的行为。
-      const outcome: DecisionOutcome = {
-        proposed: "deny",
-        final: "deny",
-        source: "policy",
-        reason: withAntiCircumvention(
-          `护栏内部异常，按 fail-closed 拦截：${describeError(error)}`,
-        ),
-        surface: toolSurface(toolName),
-        targets: [],
-      };
-      record(ctx, event, toolName, outcome, Date.now() - started);
+      const outcome = failClosed(
+        toolName,
+        `护栏内部异常，按 fail-closed 拦截：${describeError(error)}`,
+      );
+      record(ctx, request, outcome, Date.now() - started);
       return outcome;
     }
 
-    const outcome = await resolveOutcome({ call, facts, toolName, config, ctx });
-    record(ctx, event, toolName, outcome, Date.now() - started);
+    let outcome: DecisionOutcome;
+    try {
+      outcome = await resolveOutcome({ call, facts, request, config, ctx });
+    } catch (error) {
+      outcome = failClosed(
+        toolName,
+        `护栏内部异常，按 fail-closed 拦截：${describeError(error)}`,
+      );
+    }
+    record(ctx, request, outcome, Date.now() - started);
     return outcome;
   }
 
   interface ResolveInput {
     call: CallEvaluation;
     facts: Facts;
-    toolName: string;
+    request: DecisionRequest;
     config: ResolvedConfig;
     ctx: ExtensionContext;
   }
 
   async function resolveOutcome(input: ResolveInput): Promise<DecisionOutcome> {
-    const { call, config, ctx } = input;
+    const { call, config, ctx, request } = input;
     const proposed = call.action;
-    const surface = call.decisive?.object.surfaces[0] ?? toolSurface(input.toolName);
+    const surface = call.decisive?.object.surfaces[0] ?? toolSurface(request.toolName);
     const targets = collectTargets(call);
 
     let action = call.action;
     let source: DecisionSource = "policy";
     let reason = describeReason(call, config);
     let matchedPattern = call.decisive?.matchedPattern;
+    let reviewerModel: string | undefined;
+    let verdict: "allow" | "deny" | "unavailable" | undefined;
+    let evidenceRounds: number | undefined;
 
     // 需要授权的对象 = 动作落在 ask / review 的对象；与创建授权时的对象集合保持一致。
     const grantedObjects = call.evaluations
-      .filter(
-        (evaluation) =>
-          evaluation.action === "ask" || evaluation.action === "review",
-      )
+      .filter((evaluation) => evaluation.action === "ask" || evaluation.action === "review")
       .map((evaluation) => evaluation.object);
     const hasUnresolved = call.evaluations.some(
       (evaluation) => evaluation.object.unresolved !== undefined,
     );
-    const anyDeny = call.evaluations.some(
-      (evaluation) => evaluation.action === "deny",
-    );
+    const anyDeny = call.evaluations.some((evaluation) => evaluation.action === "deny");
 
     if (config.yoloMode && (action === "ask" || action === "review")) {
       return {
@@ -304,9 +358,13 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
     }
 
     if (action === "review") {
-      // M4 的评审层会在这里接管；M3 一律转人工，避免把 review 当成静默放行。
-      action = "ask";
-      reason = `${reason ?? ""} 评审层尚未接入，转人工确认。`.trim();
+      const reviewed = await runReview(input, reason ?? "");
+      action = reviewed.action;
+      source = reviewed.source;
+      reason = reviewed.reason;
+      reviewerModel = reviewed.reviewerModel;
+      verdict = reviewed.verdict;
+      evidenceRounds = reviewed.evidenceRounds;
     }
 
     if (action === "ask") {
@@ -315,6 +373,8 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
         config,
         grantedObjects,
         input,
+        reason,
+        reviewNote: reviewerModel === undefined ? undefined : reason,
       });
       action = resolved.action;
       source = resolved.source;
@@ -336,7 +396,77 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
     if (matchedPattern !== undefined) {
       outcome.matchedPattern = matchedPattern;
     }
+    if (reviewerModel !== undefined) {
+      outcome.reviewerModel = reviewerModel;
+    }
+    if (verdict !== undefined) {
+      outcome.verdict = verdict;
+    }
+    if (evidenceRounds !== undefined) {
+      outcome.evidenceRounds = evidenceRounds;
+    }
     return outcome;
+  }
+
+  /**
+   * 评审（FR-19~FR-28）。
+   *
+   * `userBashPolicy.autoReview=false` 时不调用模型，直接转人工：这是"用户可以拒绝让模型
+   * 参与自己手输命令的裁决"的开关（FR-60）。`user_bash` 的模型解析顺序是
+   * `userBashPolicy.model` → `reviewer.model`。
+   */
+  async function runReview(
+    input: ResolveInput,
+    ruleReason: string,
+  ): Promise<{
+    action: "allow" | "deny" | "ask";
+    source: DecisionSource;
+    reason: string;
+    reviewerModel?: string;
+    verdict?: "allow" | "deny" | "unavailable";
+    evidenceRounds?: number;
+  }> {
+    const { config, ctx, call, facts, request } = input;
+
+    if (request.origin === "user_bash" && !config.userBashPolicy.autoReview) {
+      return {
+        action: "ask",
+        source: "policy",
+        reason: `${ruleReason} userBashPolicy.autoReview=false，用户手输命令不交评审模型，转人工确认（FR-60）。`.trim(),
+      };
+    }
+
+    const modelSpec =
+      request.origin === "user_bash"
+        ? (config.userBashPolicy.model ?? config.reviewer.model)
+        : config.reviewer.model;
+
+    const transcript = config.reviewer.transcript
+      ? transcriptFromEntries(ctx.sessionManager.getEntries(), {
+          maxTotalChars: config.reviewer.transcriptBudgetChars,
+        }).text
+      : undefined;
+
+    const outcome: ReviewOutcome = await requestReview({
+      origin: request.origin,
+      toolName: request.toolName,
+      toolInput: request.input,
+      cwd: request.cwd ?? ctx.cwd,
+      reason: ruleReason,
+      factsSummary: describeObjects(call, facts),
+      grants: [...deps.runtime.grants.keys].map(formatGrantKey),
+      ...(transcript === undefined ? {} : { transcript }),
+      registry: registryFacade(ctx),
+      modelSpec,
+      timeoutMs: config.reviewer.timeoutMs,
+      maxEvidenceRounds: config.reviewer.maxEvidenceRounds,
+      evidenceTools: config.reviewer.evidenceTools
+        ? createEvidenceTools(request.cwd ?? ctx.cwd)
+        : [],
+      ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
+    });
+
+    return applyReviewOutcome(outcome, config);
   }
 
   interface ResolveAskInput {
@@ -344,50 +474,63 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
     config: ResolvedConfig;
     grantedObjects: readonly PolicyObject[];
     input: ResolveInput;
+    /** 转人工前的理由（命中规则、评审结论或 4.5 的调用级分支）。 */
+    reason: string | undefined;
+    /** 评审给出的补充说明（风险门槛转人工时带入对话框）。 */
+    reviewNote?: string;
   }
 
   async function resolveAsk(
     askInput: ResolveAskInput,
   ): Promise<{ action: "allow" | "deny"; source: DecisionSource; reason: string }> {
-    const { ctx, config, grantedObjects, input } = askInput;
+    const { ctx, config, grantedObjects, input, reviewNote, reason } = askInput;
+    // 无 UI 的降级理由要把"为什么走到这里"带上，否则用户看不到触发人工确认的那条规则。
+    const lead = reason === undefined || reason.length === 0 ? "" : `${reason} `;
 
     if (!ctx.hasUI) {
       // FR-46：没有交互界面时按 onAskWithoutUI 处理。失败分支若指向 ask / review，
-      // 在本阶段同样无法执行（review 已转 ask），必须 fail-closed 落到 deny。
+      // 在这里同样无法执行，必须 fail-closed 落到 deny。
       const fallback = config.onAskWithoutUI;
       if (fallback === "allow") {
         return {
           action: "allow",
           source: "policy",
-          reason: "无交互界面可确认，按 onAskWithoutUI=allow 放行（FR-46）。",
+          reason: `${lead}无交互界面可确认，按 onAskWithoutUI=allow 放行（FR-46）。`,
         };
       }
       if (fallback === "deny") {
         return {
           action: "deny",
           source: "policy",
-          reason: "无交互界面可确认，按 onAskWithoutUI=deny 拦截（FR-46）。",
+          reason: `${lead}无交互界面可确认，按 onAskWithoutUI=deny 拦截（FR-46）。`,
         };
       }
       return {
         action: "deny",
         source: "policy",
-        reason: `无交互界面可确认，onAskWithoutUI=${fallback} 在无 UI 时无法执行，按 fail-closed 拦截。`,
+        reason: `${lead}无交互界面可确认，onAskWithoutUI=${fallback} 在无 UI 时无法执行，按 fail-closed 拦截。`,
       };
     }
 
     const suggestions = config.sessionGrants.enabled
-      ? grantKeysForObjects(grantedObjects).map((key) =>
-          formatGrantKey(encodeGrantKey(key)),
-        )
+      ? grantKeysForObjects(grantedObjects).map((key) => formatGrantKey(encodeGrantKey(key)))
       : [];
+    const detail = [
+      reviewNote === undefined ? undefined : `评审说明：${reviewNote}`,
+      describeObjects(input.call, input.facts),
+    ]
+      .filter((line): line is string => line !== undefined && line.length > 0)
+      .join("\n");
     const decision = await askHuman(ctx, {
-      summary: `工具 ${input.toolName} 提议动作 ${input.call.action}，需要确认。\n目标：${collectTargets(input.call).join(", ")}`,
-      detail: describeObjects(input.call, input.facts),
+      summary: `工具 ${input.request.toolName} 提议动作 ${input.call.action}，需要确认。\n目标：${collectTargets(
+        input.call,
+      ).join(", ")}`,
+      detail,
       suggestions,
     });
 
     if (decision?.choice === "session") {
+      // 只有这里能创建会话授权（FR-29）：评审模型的 allow 与缓存都不写入。
       for (const key of grantKeysForObjects(grantedObjects)) {
         deps.runtime.grants.keys.add(encodeGrantKey(key));
       }
@@ -403,14 +546,27 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
     return {
       action: "deny",
       source: "human",
-      reason:
-        decision?.note === undefined
-          ? "人工拒绝。"
-          : `人工拒绝：${decision.note}`,
+      reason: decision?.note === undefined ? "人工拒绝。" : `人工拒绝：${decision.note}`,
     };
   }
 
+  async function decideToolCall(
+    event: ToolCallEvent,
+    ctx: ExtensionContext,
+  ): Promise<DecisionOutcome | undefined> {
+    return decide(
+      {
+        origin: "tool_call",
+        toolName: event.toolName,
+        toolCallId: event.toolCallId,
+        input: event.input,
+      },
+      ctx,
+    );
+  }
+
   return {
+    decide,
     decideToolCall,
 
     async handleToolCall(
@@ -442,8 +598,7 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
 function collectTargets(call: CallEvaluation): string[] {
   const primaries = call.evaluations
     .filter(
-      (evaluation) =>
-        evaluation.action !== undefined && evaluation.object.kind !== "tool",
+      (evaluation) => evaluation.action !== undefined && evaluation.object.kind !== "tool",
     )
     .map((evaluation) => evaluation.object.primary);
   const fallback = call.evaluations.map((evaluation) => evaluation.object.primary);
@@ -487,7 +642,7 @@ function describeReason(call: CallEvaluation, config: ResolvedConfig): string {
   }
 }
 
-/** 人工提示里的逐对象摘要：让用户看到"哪些对象各自被什么规则判成了什么"。 */
+/** 逐对象摘要：既用于人工提示，也作为评审的 facts 摘要（FR-20）。 */
 function describeObjects(call: CallEvaluation, facts: Facts): string {
   const lines = call.evaluations.map((evaluation) => {
     const action = evaluation.action ?? "（不表态）";
