@@ -159,6 +159,10 @@ interface GuardianRuntime {
   callIndex: number;             // 单调递增的调用序号（供预评分滞后判定）
   classifier: ClassifierState;   // 预评分（默认关闭）
   lastDecision?: LastDecision;   // 最近一次决策，供状态栏显示来源（FR-41）
+  isSubagentSession: boolean;    // 本会话已识别为子代理会话（FR-56）
+  subagentCoverage: "none" | "unguarded";  // 父会话视图：是否发现过未加载护栏的子会话（FR-55）
+  unguardedChildren: Set<string>;          // 供 /perm status 列出具体子会话
+  userBashConflict: boolean;
   // 子会话 ID registry 在 extension/subagents.ts 的进程级状态中，不放进会话 runtime
   isSubagentSession: boolean;
 }
@@ -174,7 +178,7 @@ interface GuardianRuntime {
 | `tool_call` | 决策管线（见 §4） |
 | `user_bash` | 用户直接执行命令的决策入口（见 §4.0.1） |
 | `tool_result` | 若预评分启用，异步调度轨迹评分（非阻塞） |
-| `subagents:child:session-created` / `bound` / `disposed` | 注册/校验/清除子会话 ID，供 `subagentPolicy` 使用 |
+| `subagents:child:session-created` / `bound` / `disposed` | 在进程级 registry 中注册/校对绑定握手/清除子会话 ID（见 §8.5）；子实例在自己的 `session_start` 写握手并识别自己 |
 | `session_shutdown` | 清空 grants / cache / breaker / 释放 parser |
 
 配置读取时机：**在 `session_start` 与 `before_agent_start` 各刷新一次**（重新读磁盘 + 重新合并），既支持会话间的配置修改，也支持会话内 `/perm reload`。不在扩展工厂阶段读配置，因为此时 `ctx`（及项目信任状态）尚不可用。
@@ -202,6 +206,8 @@ tool_call(event, ctx)
  ├─ 4. 规则求值 evaluate(facts) ─► 各对象的 action
  │      用户规则未命中时：只读白名单 ──► allow（FR-9）；
  │        不可静态确定的对象 ──► onUnresolvedFacts；其余 ──► defaultAction（surface 矩阵）
+ │        子代理会话在 subagentPolicy.enabled 时把 surface 矩阵那一层的动作抬到
+ │        subagentPolicy.defaultAction（取最严格者，只收紧；见 §8.5）
  │      若存在 unresolved 且至少一个可信对象明确 deny ──► ask
  │      多个已解析命令单元同时得到 allow 与 deny
  │        ──► onMixedCommandActions（默认 deny）
@@ -522,7 +528,8 @@ interface CompiledRule {
 求值：对每个被裁决对象，先取**候选规则**（`rule.surface` 属于该对象的 surface 集合或为 `"*"`，且 matcher 命中任一匹配目标），再
 **按 `(layer, surface)` 分组、每组取最后一条命中**（FR-5 的 last-match-wins），最后在组间取最严格者（FR-6）。
 **baseline 层只在没有任何用户层命中时才参与**（它是兜底层，不是普通一层，见 §6.1）；
-只读白名单（FR-9）与对象级优先顺序见 §4.3。
+只读白名单（FR-9）与对象级优先顺序见 §4.3。子代理会话在 `subagentPolicy.enabled` 时把 baseline
+那一层的动作抬到 `subagentPolicy.defaultAction`（取最严格者，因此只可能收紧；见 §8.5）。
 
 surface 匹配：`rule.surface === 对象的 surface` 或 `rule.surface === "*"`；
 未识别 / 自定义工具的 surface 用 `tool` 哨兵（同时仍然允许按工具名精确写规则）。
@@ -831,10 +838,11 @@ key = sha256([
 
 - 当前对接基线为 `@gotgenes/pi-subagents` v21.7.1；子会话默认继承父 extensions，但 `excludedExtensionPackages` 可以把它排除。
 - `extension/subagents.ts` 在进程级 registry 中，通过 `subagents:child:session-created` / `disposed` 按 `sessionId` 标记子会话。该 registry 不能用 `GuardianRuntime` 的会话内 Map 代替，因为父扩展实例注册的事件必须能被随后绑定的子扩展实例读取。
-- 当前 `ctx.sessionManager.getSessionId()` 命中 registry 后启用 `subagentPolicy`。
-- 子扩展在自身 `session_start` 向 `pi.events` 发一个带 `sessionId` 的绑定握手；父实例收到 `subagents:child:bound` 后核对 registry 中是否已有握手。缺失时输出显式告警，覆盖 `excludedExtensionPackages` 把护栏排出的情况。
+- 当前 `ctx.sessionManager.getSessionId()` 命中 registry 后启用 `subagentPolicy`（`runtime.isSubagentSession`）。
+- 绑定握手也落在**同一个进程级存储**上，而不是 `pi.events`：pi 0.85.1 的事件总线是**按会话**的（`DefaultResourceLoader` 在未收到 `eventBus` 时自己 `createEventBus()`，而子代理实现用 `new DefaultResourceLoader(opts)` 造子会话的 loader），因此子实例发布的东西父实例听不到。子实例在自身 `session_start` 把 `sessionId` 写进存储作为握手；父实例收到 `subagents:child:bound` 时核对存储。缺失时输出显式告警，覆盖 `excludedExtensionPackages` 把护栏排出的情况。存储用 `globalThis` + `Symbol.for()`，因为父子扩展实例可能连模块实例都不共享。
 - 缺失握手的固定告警合同：有 UI 时 `ctx.ui.notify(..., "warning")`，无 UI 时 `console.warn`；始终调用 `pi.appendEntry("pi-permission-guardian.subagent-warning.v1", { sessionId, parentSessionId, reason: "guard-not-bound" })`，并把父会话 `/perm status` 的 `subagentCoverage` 标为 `unguarded`。
-- 子代理默认动作只能配置为 `deny` / `ask` / `review`，默认 `review`，不能通过该段放宽为 `allow`。
+- 子代理默认动作只能配置为 `deny` / `ask` / `review`，默认 `review`，不能通过该段放宽为 `allow`；求值时取它与默认动作矩阵中最严格者，因此只可能收紧。
+- 它只作用于**默认动作矩阵**那一层：用户显式规则（allow 与 deny 都算）、只读命令白名单（FR-9）与 `onUnresolvedFacts` 各自的分支不受影响——那三者分别是用户的显式决定、已逐个核实无副作用的命令集、以及“无法静态确定”的失败分支，都不是“默认动作”。`path_read` / `path_write` 仍然不表态，不会因为子代理策略变成投票面。
 - `allowSessionGrants=false` 时，子代理既不能使用父会话授权，也不能创建自己的会话授权。
 - 授权、缓存和熔断本来就是会话内存；父子会话不共享。无法识别子代理时必须由 `/perm status` 明确显示"未识别，使用父策略"，不能静默宣称已启用。
 

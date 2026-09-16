@@ -319,17 +319,20 @@ src/extension/startup.ts
 src/extension/subagents.ts
 src/extension/register.ts
 src/extension/startup.ts
+src/policy/evaluate.ts
+src/decision/pipeline.ts
 ```
 
 ### 实现顺序
 
-1. 在进程级 registry 中订阅 `subagents:child:session-created`、`bound` 和 `disposed`。
-2. `session-created` 注册必须保持同步，确保子扩展绑定前已有 sessionId 记录。
-3. 子扩展在 `session_start` 发布带 sessionId 的绑定握手；父实例在 `bound` 时核对握手。
-4. 缺失握手时有 UI 用 `ctx.ui.notify(..., "warning")`，无 UI 用 `console.warn`。
-5. 始终追加 `pi-permission-guardian.subagent-warning.v1`，并把父会话 `subagentCoverage` 标为 `unguarded`。
-6. 命中子会话时启用 `subagentPolicy`；只收紧默认动作，不放宽显式规则，不共享父子 grants、cache、breaker。
-7. 无法识别子代理时，`/perm status` 必须显示“未识别，使用父策略”，不能声称已启用子代理策略。
+1. `extension/subagents.ts` 在进程级存储（`globalThis` + `Symbol.for()`）中订阅 `subagents:child:session-created`、`bound` 和 `disposed`。
+2. `session-created` 注册必须保持同步，确保子扩展绑定前已有 sessionId 记录（核心在 `bindExtensions()` 之前同步发出，事件总线同步派发）。
+3. 子扩展在 `session_start` 把自己的 sessionId 写进同一个进程级存储作为绑定握手，并在命中 registry 时把 `runtime.isSubagentSession` 置位（必须在 `runtime` 重置之后）。
+4. 父实例在 `bound` 时核对握手：有 UI 用 `ctx.ui.notify(..., "warning")`，无 UI 用 `console.warn`，可见告警每个父会话只发一次。
+5. 每个受影响的子会话都追加 `pi-permission-guardian.subagent-warning.v1`，并把父会话 `subagentCoverage` 标为 `unguarded`。
+6. 命中子会话且 `subagentPolicy.enabled` 时，把默认动作矩阵的动作抬到 `subagentPolicy.defaultAction`（取最严格者），只收紧默认动作，不放宽显式规则，也不影响只读白名单与 `onUnresolvedFacts`；父子不共享 grants / cache / breaker（后三者本来就是会话内存）。
+7. `allowSessionGrants=false` 时子代理既不查询也不写入会话授权，对话框也不提供“本会话允许此类”。
+8. 无法识别子代理时，`/perm status` 必须显示“未识别，使用父策略”；发现未加载护栏的子会话时显示 `unguarded` 并列出子会话 ID。
 
 ### 验证门禁
 

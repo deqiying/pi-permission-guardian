@@ -258,7 +258,8 @@ const subagentPolicySchema = z
       .enum(["deny", "ask", "review"])
       .default("review")
       .meta({
-        description: "子代理中规则未命中时使用的默认动作；不允许 allow。",
+        description:
+          "子代理中规则未命中时使用的默认动作；与默认动作矩阵取最严格者，因此只可能收紧；不允许 allow。",
       }),
     allowSessionGrants: z
       .boolean()
@@ -270,7 +271,7 @@ const subagentPolicySchema = z
   })
   .meta({
     description:
-      "子代理会话的保守策略（FR-56）。v1 仅对接 @gotgenes/pi-subagents v21.7.1；仅收紧未命中规则的默认动作，不能放宽父配置中的显式规则。",
+      "子代理会话的保守策略（FR-56）。v1 仅对接 @gotgenes/pi-subagents v21.7.1；只收紧默认动作矩阵，不影响用户显式规则、只读白名单与 onUnresolvedFacts。",
   });
 
 const workingDirectorySchema = z.strictObject({
