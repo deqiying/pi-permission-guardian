@@ -1,6 +1,6 @@
 # pi-permission-guardian 需求规格说明
 
-- 状态：待评审（决策已由用户确认，见 §7）
+- 状态：待评审（核心决策已定稿，见 §7）
 - 目标运行环境：pi coding agent ≥ 0.85.1（本机实测 0.85.1），Windows 为主的跨平台
 - 参考源码：`reference/`（仅供查阅，**不是依赖**；来源与版本见 `reference/README.md`）
 
@@ -36,8 +36,8 @@ pi agent 自身只提供 `project_trust`，而它控制的是**项目资源是�
 - **N1** 不是沙箱或 OS 级隔离。护栏只在 `tool_call` 决策层工作，无法阻止扩展自身、`pi.exec` 或用户直连 shell 的行为。
 - **N2** 不拦截 pi 内部模型调用（compaction、分支摘要、skills 等），只拦截工具调用。
 - **N3** 不替换 pi 的 `project_trust` 机制，两者互补。
-- **N4** v1 不做跨进程的授权转发（前台/后台子代理各自独立判定，见 §8.4）。
-- **N5** 不接管用户手工输入 `!command` 的执行（`user_bash` 事件作为后续可选扩展点，见 §9）。
+- **N4** v1 不做跨会话的授权转发（父子子代理会话各自独立判定，见 §8.4）。
+- **N5** 不重写用户手工输入 `!command` / `!!command` 的命令文本；只在 `user_bash` 决策边界允许、拒绝或转交评审，不提供独立 shell 包装器或 OS 级隔离。
 - **N6** 不提供策略 DSL/脚本表达式；规则就是 glob + 四种动作。
 
 ## 4. 术语
@@ -49,7 +49,7 @@ pi agent 自身只提供 `project_trust`，而它控制的是**项目资源是�
 | **action（动作）** | 名单对一条规则给出的裁决：`allow` / `deny` / `ask` / `review`。 |
 | **intent（意图）** | 一次工具调用对应的待裁决对象集合（命令单元列表 / 路径列表 + 方向）。 |
 | **review（复查）** | 把 intent 连同上下文交给评审模型，得到 `allow` / `deny` 的结构化结论。 |
-| **grant（授权记忆）** | 人工或模型批准后，本次会话内对等价 intent 直接放行的记忆。 |
+| **grant（授权记忆）** | 只有人工确认"本会话允许此类"后，才会在本次会话内对等价 intent 直接放行的记忆。 |
 | **unavailable** | 评审未能产出结论的状态（超时、取消、模型报错、输出无法解析、模型未配置）。它是基础设施结果，**不是安全结论**。 |
 
 ## 5. 用户场景
@@ -79,7 +79,7 @@ agent 读取 `~/.pi/agent/` 下的会话文件，或写入 `../other-project/` �
 验收：审计日志 `source=policy`、`decision=unavailable-blocked`；无 UI 环境下行为一致。
 
 **S7 子代理**
-后台子代理（`async: true`）执行 `rm -rf` 类命令。期望：同一套规则生效，不允许"派生子代理"成为绕过护栏的手段。
+子代理会话执行 `rm -rf` 类命令。期望：同一套规则生效，不允许"派生子代理"成为绕过护栏的手段，并用更保守的 `subagentPolicy` 覆盖未命中默认动作。
 验收：见 §8.4 的覆盖范围与限制说明。
 
 ## 6. 功能需求
@@ -96,7 +96,7 @@ agent 读取 `~/.pi/agent/` 下的会话文件，或写入 `../other-project/` �
 | FR-6 | 跨配置层（全局 / 项目）合并时 **最严格者胜**：`deny > ask > review > allow` | 合并结果有测试；理由见 §7 决策 D5 |
 | FR-7 | 未命中任何规则时按 surface 默认动作裁决（见 FR-8），而非统一兜底 | 默认动作矩阵有测试 |
 | FR-8 | 提供按 surface 的默认动作矩阵，默认值：读取类 `allow`；`write` / `edit` / `bash` / `external_directory` / 未识别工具 `review` | 默认矩阵写入架构文档并在 `defaultAction` 未配置时生效 |
-| FR-9 | 支持"只读命令白名单"（如 `pwd`、`ls`、`cat`、`rg`、`git status`、`git diff`），命中即 `allow` 免评审 | 白名单内命令不产生模型调用 |
+| FR-9 | 支持"只读命令白名单"：内置一小组高置信命令，命中即 `allow` 免评审；用户显式配置 `workingDirectory.readOnlyCommands` 时以该数组**完整覆盖**内置默认集，配置空数组可关闭默认白名单 | 未配置时使用内置集；显式数组完全替换而非增量合并；白名单内命令不产生模型调用 |
 | FR-10 | 规则可携带 `reason`，在拦截信息中展示 | `deny` 的返回 `reason` 含自定义理由 |
 | FR-59 | 同一 shell 调用的多个命令单元同时得到 `allow` 与 `deny` 时，允许通过 `onMixedCommandActions` 将调用级冲突配置为 `ask` / `review` / `deny` | 三种配置各有测试；默认 `deny`；仅跨命令单元同时出现 `allow` 与 `deny` 时触发，`deny` 与其他非 `allow` 动作组合仍按最严格者裁决 |
 
@@ -136,7 +136,7 @@ agent 读取 `~/.pi/agent/` 下的会话文件，或写入 `../other-project/` �
 
 | 编号 | 需求 | 验收标准 |
 |---|---|---|
-| FR-29 | **会话授权记忆**：人工选择"本会话允许此类"后写入会话内存规则，等价 intent 直接 `allow`；会话结束清空，不落盘 | 会话内二次调用无弹窗无评审；`session_shutdown` 后清空 |
+| FR-29 | **会话授权记忆**：只有人工在确认对话框中选择"本会话允许此类"才能创建会话授权，之后等价 intent 直接 `allow`；评审模型 allow、缓存命中、自动审核和用户手输 `!command` 本身都不能创建授权。会话结束清空，不落盘 | 会话内二次调用无弹窗无评审；模型 allow 不产生 grant；`session_shutdown` 后清空 |
 | FR-30 | 授权键由 facts 生成建议模式（如 `rm -rf ./dist` → `rm -rf ./dist*`），并在提示中展示供用户确认 | 建议模式生成有单测 |
 | FR-31 | **判定缓存**：key = hash(surface + 规范化目标集合 + 方向 + cwd + 规则集版本 + 用户授权版本 + 评审模型)，命中即复用结论 | 相同 key 二次调用不产生评审；key 任一维度变化即失效 |
 | FR-32 | 缓存只存确定结论（`allow` / `deny`），**不存** `unavailable`；TTL 与容量可配置（默认 300000ms / 200 条），仅内存 | 有用例验证 unavailable 不入缓存 |
@@ -155,7 +155,7 @@ agent 读取 `~/.pi/agent/` 下的会话文件，或写入 `../other-project/` �
 | FR-40 | 提供 CLI flag `--perm` 使会话启动即启用；`/perm off` 可关闭 | flag 生效；关闭后 `tool_call` 立即返回 `undefined` |
 | FR-41 | 状态栏显示当前模式与最近一次决策来源 | `ctx.ui.setStatus` 被调用；无 UI 时不报错 |
 | FR-42 | 人工确认对话框给出：待执行动作、命中规则、风险点、建议动作，以及选项 `仅此次允许` / `本会话允许此类` / `拒绝` / `拒绝并说明原因` | 对话框选项可测；选择结果写入授权记忆或拒绝理由 |
-| FR-43 | 审计日志：JSONL 落盘至 `<agentDir>/extensions/pi-permission-guardian/logs/`，字段含时间、会话、工具调用 id、工具名、surface、目标、命中规则、动作、来源、模型、verdict、耗时、理由；文件权限 0600 | 每条决策产生一行；字段完整 |
+| FR-43 | 审计日志：JSONL 落盘至 `<agentDir>/extensions/pi-permission-guardian/logs/`，按进程本地日期切分为 `guardian-YYYY-MM-DD.jsonl`，默认保留 14 个自然日且可通过 `auditLog.retentionDays` 配置；字段含时间、会话、工具调用 id、工具名、surface、目标、命中规则、动作、来源、模型、verdict、耗时、理由；文件权限 0600 | 跨日写入新文件；过期日志自动清理；保留期边界有测试；字段完整；清理失败不影响决策 |
 | FR-44 | 审计日志的敏感信息处理：`write` / `edit` 的 `content` 只记录长度与哈希；命中敏感路径规则时不记录内容；路径与命令原文记录（审计必需） | 有脱敏用例 |
 | FR-45 | 通过 `pi.appendEntry` 写入会话内决策记录（类型版本化），可在 TUI 中查看 | 条目类型与字段稳定并版本化 |
 | FR-46 | `ctx.hasUI === false`（print / json 模式）时：`ask` 按 `onAskWithoutUI`（默认 `deny`）处理；`review` 仍照常执行（模型调用不需要 UI）；`unavailable` 按 `onReviewUnavailable` | 三种模式各有用例 |
@@ -178,13 +178,25 @@ agent 读取 `~/.pi/agent/` 下的会话文件，或写入 `../other-project/` �
 
 | 编号 | 需求 | 验收标准 |
 |---|---|---|
-| FR-54 | 护栏同样作用于子代理内部的工具调用，不允许通过派生子代理绕过 | 后台子代理中触发 `deny` 规则时确实被拦截 |
-| FR-55 | 文档必须给出让**前台子代理**也受护栏约束的配置方法（agent 定义的 `extensions` 字段或 `subagents.defaultExtensions`），并说明前台子代理默认不加载 ambient 扩展这一 pi 现状 | 文档含可直接复制的配置片段；有验证记录 |
-| FR-56 | 子代理进程与父进程的授权记忆、缓存、熔断互不共享；子代理内策略应可单独配置更保守的默认动作 | 提供 `subagentPolicy` 配置段；文档说明差异 |
+| FR-54 | 护栏同样作用于子代理会话内部的工具调用，不允许通过派生子代理绕过 | 子代理会话中触发 `deny` 规则时确实被拦截 |
+| FR-55 | 对接 `@gotgenes/pi-subagents` v21.7.1 的 child lifecycle：`session-created` 注册子会话，子扩展于 `session_start` 发送绑定握手，`bound` 校验握手并告警缺失，`disposed` 清理；文档说明该版本子会话默认继承父 extensions，以及 `excludedExtensionPackages` 可能让子会话失去护栏 | 子会话识别测试；未加载护栏时父会话告警；文档记录验证版本 |
+| FR-56 | 子代理会话与父会话的授权记忆、缓存、熔断互不共享；子代理内策略应可单独配置更保守的默认动作 | 提供 `subagentPolicy`（`enabled`、`defaultAction`、`allowSessionGrants`）；默认 `defaultAction=review`、`allowSessionGrants=false`；文档说明差异 |
+
+### 6.8 用户直接执行
+
+| 编号 | 需求 | 验收标准 |
+|---|---|---|
+| FR-60 | 支持 `user_bash`：用户输入 `!command` / `!!command` 时复用同一 facts、规则、授权、评审和审计管线；`allow` 交给 pi 正常执行，`deny` 返回替代 `BashResult` 阻止真实执行，`review` 可使用 `userBashPolicy.model`（缺省复用 `reviewer.model`）自动审核；`!!` 仍保持输出不进入模型上下文 | `!` / `!!` 均有测试；deny 时真实命令未执行；review 模型 allow 不创建 grant；`!!` 的替代结果仍不进入上下文 |
+
+### 6.9 不确定与明确拒绝的组合
+
+| 编号 | 需求 | 验收标准 |
+|---|---|---|
+| FR-61 | 同一调用中同时存在 `unresolved` facts 和至少一个可信对象明确得到 `deny` 时，最终动作固定为 `ask`；若没有明确 `deny`，仍按 `onUnresolvedFacts` 处理 | 有 `unresolved + deny`、`unresolved + allow/review` 两类测试；前者不得被 `onUnresolvedFacts` 放宽为 `review` |
 
 ## 7. 关键设计决策
 
-以下 D1–D10 已由用户确认，D11–D18 为调研与评审后新增的决策（D16–D18 已由用户确认）。
+以下 D1–D25 为当前设计决策；D1–D10、D16–D25 已由用户确认，D11–D15 为调研与评审后新增。
 
 | 编号 | 决策 | 理由与影响 |
 |---|---|---|
@@ -206,6 +218,13 @@ agent 读取 `~/.pi/agent/` 下的会话文件，或写入 `../other-project/` �
 | **D16** | `deny` 不提供人工申诉通道 | `deny` 来自明确规则（或模型判定 + 风险门槛），改配置才是正解。若保留"当场同意放行"，任何误判都能被顺手绕过，规则形同虚设 |
 | **D17** | **官方参考配置用严格 JSON + `$schema`，解释放文档；输入侧仍容忍 JSONC** | 原生 `JSON.parse` 解析不了带注释的 JSON，必须前置剥离（且剥离后错误行号会偏移）。更关键的是带注释会读 `$schema` 失去价值，而**活的 schema（补全 + 实时校验）比死的注释更有用**，且解释放文档里能写得更长、能引用 FR 编号。同时保留输入侧宽容度，不阻碍用户自己写注释（与 pi 生态的实际习惯一致：`models.json` 支持注释、`settings.json` 不支持） |
 | **D18** | 跨命令单元的 `allow` / `deny` 冲突不强制固定为 `deny`，新增 `onMixedCommandActions`：默认 `deny`，可配置 `ask` / `review` / `deny` | 同一条 shell 调用可能由多个独立命令单元组成，固定整条拒绝会损失可重建或低风险子操作的执行能力；把冲突消解策略显式配置，同时默认保持原行为。为保证项目配置不能借混合命令放宽全局底线，该字段跨层按 `deny > ask > review` 合并，项目层只能收紧，不能放宽 |
+| **D19** | 项目许可证使用 **Apache License 2.0** | 允许商业使用、修改、分发，并包含明确的专利授权条款；仓库提交完整 `LICENSE`，未来 `package.json` 使用 `"license": "Apache-2.0"` |
+| **D20** | 审计日志按进程本地日期切分，默认保留 14 天，保留期可配置 | 避免单文件无限增长；可通过 `auditLog.retentionDays` 调整；清理失败只告警，不影响工具裁决 |
+| **D21** | 内置一小组高置信只读命令；用户显式配置 `readOnlyCommands` 时完整覆盖内置默认集 | 常见开发命令保持零评审；`[]` 可明确关闭；完整替换避免“默认集悄悄追加用户未审计命令” |
+| **D22** | `unresolved` 与明确 `deny` 同时出现时最终采用 `ask` | 保留对同一调用中高风险意图的人工确认机会；没有明确 `deny` 时仍按 `onUnresolvedFacts` |
+| **D23** | 只有人工确认才能创建会话授权 | 模型 allow、缓存和自动审核都不等于用户授权；避免把模型判断放大为本会话内长期放行 |
+| **D24** | `!command` / `!!command` 纳入 `user_bash` 护栏；`userBashPolicy` 默认开启，自动审核默认开启，模型缺省复用 `reviewer.model` | 用户直接执行不再形成绕过通道；`!!` 与 `!` 只在输出是否进入模型上下文上不同，安全裁决一致 |
+| **D25** | 新增 `subagentPolicy`：子代理默认动作可取 `deny` / `ask` / `review`，默认 `review`，且默认不允许会话授权继承或创建 | 子代理会话与父会话状态隔离，并可用更保守的默认策略运行 |
 
 ## 8. 约束与已知限制
 
@@ -236,16 +255,17 @@ agent 读取 `~/.pi/agent/` 下的会话文件，或写入 `../other-project/` �
 
 ### 8.4 子代理覆盖范围（重要）
 
-pi-subagents 的扩展加载规则导致**前台与后台子代理的护栏覆盖不同**：
+当前设计以 `reference/pi-packages` 中的 `@gotgenes/pi-subagents` **v21.7.1** 为对接版本。它在同一 pi runtime 内运行前台/后台子代理，子会话默认继承父 extensions，并通过 `pi.events` 发布可确定识别的 child lifecycle：
 
-| 子代理类型 | 是否加载本插件 | 结论 |
-|---|---|---|
-| 前台（`async: false`，父进程内） | **否**——"Foreground children never load ambient extensions" | 默认不受护栏约束，必须通过 agent 定义的 `extensions` 字段显式加载本插件路径 |
-| 后台（`async: true`，独立进程） | 是——"a background child also loads the ambient extensions" | 受约束，但配置在子进程独立加载，父进程的授权记忆/缓存/熔断不共享 |
+| 事件 | 用途 |
+|---|---|
+| `subagents:child:session-created` | 在 `bindExtensions()` 前同步注册子 `sessionId` |
+| `subagents:child:bound` | 子扩展绑定完成后校验护栏是否实际加载 |
+| `subagents:child:disposed` | 清理进程级子会话 registry |
 
-证据：`pi-subagents/docs/agents.md:323`、`:412`、`:424`、`:433-445`。
+证据：`reference/pi-packages/packages/pi-subagents/README.md:5-7`、`:252`、`:278-279`；`src/lifecycle/child-lifecycle.ts:18-80`；`src/lifecycle/create-subagent-session.ts:289-308`。
 
-本需求的 FR-54/FR-55 即针对此事实制定：护栏规则对子代理一视同仁，但**加载路径需要用户显式配置**，这一点必须在文档中显著说明，否则"子代理绕过"会成为一个沉默的安全缺口。
+父会话与子会话的 grants / cache / breaker 不共享。`excludedExtensionPackages` 可以把本插件从子会话中排除，因此 `bound` 后必须显式告警，不能把"子代理继承 extensions 的默认值"当作永久安全保证。
 
 ## 9. 待确认问题
 
@@ -253,9 +273,9 @@ pi-subagents 的扩展加载规则导致**前台与后台子代理的护栏覆�
 |---|---|---|
 | ~~Q1~~ | ~~默认动作矩阵~~ **已确认（2026-09-16）**：采用 FR-8 的 surface 矩阵——读取类 `allow`，`write` / `edit` / `bash` / `external_directory` / 未识别工具 `review` | — |
 | ~~Q2~~ | ~~`deny` 后的人工申诉~~ **已确认（2026-09-16）**：不提供，见 D16 | — |
-| Q3 | 是否需要 `user_bash` 事件支持（拦截用户手输 `!command`）？ | 建议 v1 不做，仅拦截 agent 发起的调用 |
-| Q4 | 审计日志是否需要轮转与保留策略？ | 建议按日期切分 + 保留 14 天，可配置 |
-| Q5 | 是否需要"只读命令白名单"的内置默认集，还是必须用户显式配置？（`config/config.json` 已给出 25 条的参考集合） | 建议内置一小组高置信只读命令（`pwd`/`ls`/`cat`/`git status` 等），并在文档中列全；用户配置为增量 |
+| ~~Q3~~ | ~~是否需要 `user_bash` 事件支持（拦截用户手输 `!command`）？~~ **已确认（2026-09-16）**：v1 支持，见 FR-60 / D24 | — |
+| ~~Q4~~ | ~~审计日志是否需要轮转与保留策略？~~ **已确认（2026-09-16）**：按日切分，默认保留 14 天，可配置，见 FR-43 / D20 | — |
+| ~~Q5~~ | ~~是否需要"只读命令白名单"的内置默认集？~~ **已确认（2026-09-16）**：内置一小组高置信命令；显式数组完整覆盖，见 FR-9 / D21 | — |
 | ~~Q6~~ | ~~插件标识符命名~~ **已确认（2026-09-16）**：见下表 | — |
 
 ### 命名定稿（2026-09-16）

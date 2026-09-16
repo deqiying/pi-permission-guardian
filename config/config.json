@@ -3,7 +3,10 @@
 
   "enabled": true,
   "yoloMode": false,
-  "reviewLog": true,
+  "auditLog": {
+    "enabled": true,
+    "retentionDays": 14
+  },
   "debugLog": false,
 
   "gate": "side-effect",
@@ -22,6 +25,12 @@
     "transcript": true,
     "transcriptBudgetChars": 24000,
     "maxAllowRiskLevel": "medium"
+  },
+
+  "userBashPolicy": {
+    "enabled": true,
+    "autoReview": true,
+    "model": null
   },
 
   "classifier": {
@@ -47,35 +56,14 @@
     "enabled": true
   },
 
+  "subagentPolicy": {
+    "enabled": true,
+    "defaultAction": "review",
+    "allowSessionGrants": false
+  },
+
   "workingDirectory": {
-    "allowRoots": [],
-    "readOnlyCommands": [
-      "pwd",
-      "ls",
-      "cat",
-      "head",
-      "tail",
-      "wc",
-      "file",
-      "stat",
-      "which",
-      "whoami",
-      "date",
-      "echo",
-      "rg",
-      "grep",
-      "find",
-      "git status",
-      "git diff",
-      "git log",
-      "git show",
-      "git branch",
-      "git remote -v",
-      "node --version",
-      "npm --version",
-      "pnpm --version",
-      "tsc --version"
-    ]
+    "allowRoots": []
   },
 
   "permission": {

@@ -41,10 +41,19 @@ config 解析失败时 fail-closed：该层的所有 `allow` 抬升为 `review`�
 |---|---|---|
 | `enabled` | `true` | 总开关。关闭后 `tool_call` 立即返回，等同未安装 |
 | `yoloMode` | `false` | 逃生舱：把所有 `ask` / `review` 重写为 `allow`。开启时状态栏必须显著提示（FR-53） |
-| `reviewLog` | `true` | 决策审计日志（JSONL）。每条决策落一行，含来源与依据（FR-43/44） |
+| `auditLog` | 对象 | 决策审计日志配置。固定按进程本地日期切分，默认保留 14 天（FR-43/44） |
 | `debugLog` | `false` | 额外记录 facts 全文与评审提示词。**可能含会话内容**，默认关闭 |
 
 `yoloMode` 与 `enabled` 的区别：`enabled: false` 让护栏完全不参与；`yoloMode: true` 让护栏继续评估、继续记账，只是不拦。排查"某条规则是否命中"时用 `yoloMode` 更合适。
+
+审计日志字段：
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `auditLog.enabled` | `true` | 是否写入 JSONL 审计日志 |
+| `auditLog.retentionDays` | `14` | 保留的自然日数量，包含当天。启动及跨日首次写入前清理更早的日志 |
+
+日志文件固定为 `guardian-YYYY-MM-DD.jsonl`，日期按 pi 进程本地时区计算。清理失败只记录告警，不影响工具裁决。
 
 ## 3. 评估范围
 
@@ -65,12 +74,14 @@ config 解析失败时 fail-closed：该层的所有 `allow` 抬升为 `review`�
 |---|---|---|
 | `onReviewUnavailable` | `"deny"` | 评审超时 / 模型报错 / 输出无法解析 / `reviewer.model` 未配置（FR-19） |
 | `onUnresolvedFacts` | `"review"` | bash 解析失败、包装器（`bash -c`、`sudo`、`xargs`）内部不可展开、路径非字面量（FR-12/14/15） |
-| `onAskWithoutUI` | `"deny"` | 需要人工确认但没有交互界面：`print` / `json` 模式、后台子代理 |
+| `onAskWithoutUI` | `"deny"` | 需要人工确认但没有交互界面：`print` / `json` 模式、无 UI 的子代理会话 |
 | `onMixedCommandActions` | `"deny"` | 同一 shell 调用的多个已解析命令单元中，同时存在裁决结果为 `allow` 与 `deny` 的单元 |
 
 `onReviewUnavailable` 默认 `deny` 的理由：`unavailable` 是基础设施结果，不是安全结论。若放行，等于让"拔网线 / 配错模型名"成为绕过手段。
 
 拦截时的提示文案有硬要求（FR-27）：必须说明"评审未完成，不代表因风险被拒"，避免 agent 把基础设施故障学成"这个操作不安全"。
+
+`unresolved` 不能覆盖明确 `deny`：如果同一调用中既有无法静态确定的 facts，又有至少一个可信对象明确命中 `deny`，最终动作固定为 `ask`（FR-61），而不是继续按 `onUnresolvedFacts` 的 `review` 处理。若没有明确 `deny`，才使用 `onUnresolvedFacts`。
 
 ### 4.1 多命令单元的 allow / deny 冲突
 
@@ -121,6 +132,20 @@ echo ok && rm -rf /
 
 `maxAllowRiskLevel` 就是这个分界线。把它调到 `"low"` 会让更多 allow 转人工；调到 `"high"` 则更信任模型。弱模型给出低质量 allow 的代价是安全侧的单向失败，所以默认不设在最高。
 
+### 5.3 用户直接执行 `!command` / `!!command`
+
+`!command` 是 pi 交互输入框中的用户直接 shell 命令，命令输出会在下一次模型请求时进入上下文；`!!command` 执行方式相同，但输出不加入模型上下文。两者都会触发 pi 的 `user_bash` 事件。
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `userBashPolicy.enabled` | `true` | 是否让用户直接执行的命令经过本插件 |
+| `userBashPolicy.autoReview` | `true` | `review` 动作是否自动调用评审模型；关闭时转人工确认 |
+| `userBashPolicy.model` | `null` | 自动审核模型；`null` 表示复用 `reviewer.model` |
+
+`user_bash` 与 `tool_call` 复用同一 facts、规则、授权、评审和审计管线，仅最终执行适配不同：`allow` 返回正常 shell 执行，`deny` 返回替代 `BashResult` 并让真实命令不启动，`review` 按本节自动审核。用户直接输入命令本身不创建会话授权；只有人工确认对话框中的"本会话允许此类"才能创建。
+
+跨全局/项目层合并时采用保守方向：任一层 `enabled=true` 时保持拦截；任一层 `autoReview=false` 时转人工确认；`model` 可由更具体的配置覆盖。
+
 ## 6. 降本机制
 
 ### 6.1 非阻塞预评分
@@ -161,18 +186,40 @@ echo ok && rm -rf /
 
 缓存与授权记忆都随**用户授权版本**失效——以用户消息文本指纹为准。你追加一句新指令后，此前基于旧前提的判定全部作废。
 
+会话授权只能由人工确认创建。评审模型 allow、缓存命中、自动审核或用户手输 `!command` 本身都不会写入 grant（FR-29）。
+
+### 6.4 子代理策略
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `subagentPolicy.enabled` | `true` | 检测到子代理会话时启用独立策略 |
+| `subagentPolicy.defaultAction` | `"review"` | 规则未命中时的子代理默认动作，可为 `deny` / `ask` / `review`，禁止 `allow` |
+| `subagentPolicy.allowSessionGrants` | `false` | 子代理是否可创建或使用会话授权 |
+
+父子会话的授权记忆、缓存和熔断始终不共享。`subagentPolicy` 只收紧规则未命中时的默认动作，不会放宽父配置中的显式规则；检测能力和加载方式取决于子代理实现，`/perm status` 必须显示当前子代理会话是否被识别及实际生效策略。
+
+跨层合并时，任一层 `enabled=true` 时启用子代理策略；`defaultAction` 按 `deny > ask > review` 取最严格者；任一层 `allowSessionGrants=false` 时子代理都不能创建或使用会话授权。
+
 ## 7. 工作目录
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `allowRoots` | `[]` | 视为"内部"的额外根目录 |
-| `readOnlyCommands` | `[]`（参考配置给出 25 条） | 只读命令白名单 |
+| `readOnlyCommands` | 内置高置信集合；显式配置时完整覆盖 | 只读命令白名单 |
 
 `allowRoots` 用于 monorepo：把兄弟包路径加进来，避免项目间的正常读写被判定为外部目录访问。例如 `["../shared-lib", "~/dev/monorepo"]`。
 
-`readOnlyCommands` 命中即 `allow`，不产生评审调用（FR-9）。匹配方式是**命令单元的可执行名 + 参数前缀**：`"git status"` 匹配 `git status --short`，但不匹配 `git push`。参考配置中的 25 条覆盖 `pwd`/`ls`/`cat`/`head`/`tail`/`wc`/`rg`/`grep`/`find`/`git status|diff|log|show|branch|remote -v` 与几个版本查询命令。
+`readOnlyCommands` 命中即 `allow`，不产生评审调用（FR-9）。匹配方式是**命令单元的可执行名 + 参数前缀**：`"git status"` 匹配 `git status --short`，但不匹配 `git push`。
 
-判断标准是"只读且无外部副作用"。往这个列表里加东西前先自问：这条命令能否被参数变成写操作？（`find` 有 `-exec`，`git branch` 有删除形式——它们留在列表里是因为护栏仍会对 `find -exec` 这类构造降级到 `review`。）
+内置默认集为：
+
+```text
+pwd, ls, cat, head, tail, wc, file, stat, which, whoami, date, echo,
+git status, git diff, git log, git show, git remote -v,
+node --version, npm --version, pnpm --version, tsc --version
+```
+
+省略 `readOnlyCommands` 时使用内置集；一旦显式配置数组，该数组**完整覆盖**内置集，而不是增量追加。`"readOnlyCommands": []` 可关闭默认白名单。`rg`、`grep`、`find`、`git branch` 等带可选的外部执行或变更形态，不进入高置信内置集，用户可以按项目需要显式加入。
 
 ## 8. 规则表 `permission`
 

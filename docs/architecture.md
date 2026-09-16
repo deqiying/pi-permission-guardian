@@ -8,7 +8,7 @@
 
 ## 1. 总体结构与加载模型
 
-插件是一个 pi package，单进程内以扩展形式运行，只订阅一个决策事件（`tool_call`），其余事件仅用于生命周期与状态维护。
+插件是一个 pi package，在每个承载会话的 pi 进程内以扩展形式运行，订阅两个决策入口（`tool_call` 与 `user_bash`），其余事件仅用于生命周期、子代理识别与状态维护。两个入口共用同一 facts、规则、评审和审计内核，只在实际执行适配层分流。
 
 ```
                     pi agent 进程
@@ -19,7 +19,8 @@
 │    │                    ┌────────▼─────────┐                  │
 │    │                    │  pi extension    │                  │
 │    │                    │  runner          │                  │
-│    │                    │  tool_call 事件  │                  │
+│    │                    │ tool_call /      │                  │
+│    │                    │ user_bash 事件   │                  │
 │    │                    └────────┬─────────┘                  │
 │    │                             │                            │
 │    │        ┌────────────────────▼─────────────────────┐      │
@@ -40,7 +41,7 @@
 
 **关键架构约束：**
 
-- **单一入口、同步返回**。决策必须发生在 `tool_call` handler 的 `await` 之内；pi 没有"先放行再撤回"的机制。这意味着评审延迟直接叠加在用户等待上，是性能预算的主要消费者。
+- **统一内核、同步返回**。`tool_call` 与 `user_bash` 都在各自 handler 的 `await` 之内完成决策；pi 没有"先放行再撤回"的机制。这意味着评审延迟直接叠加在用户等待上，是性能预算的主要消费者。
 - **评审不经过 pi 的工具分发**。证据工具通过 `createReadOnlyTools(cwd)` 拿到工具对象后**进程内直接 `execute()`**，不产生新的 `tool_call` 事件，因此天然无递归（FR-28）。
 - **状态是会话级的**。授权记忆、缓存、熔断都是内存态，`session_shutdown` 清空。`/reload` 后必须重建。
 
@@ -48,6 +49,7 @@
 
 ```
 pi-permission-guardian/
+├── LICENSE                         # Apache License 2.0
 ├── package.json                    # pi package 声明（pi.extensions / dependencies / peerDependencies）
 ├── extensions/
 │   └── guardian.ts                 # 扩展入口：export default (pi) => registerGuardian(pi)
@@ -56,7 +58,9 @@ pi-permission-guardian/
 │   │   ├── register.ts             # 事件订阅与装配（唯一组合根）
 │   │   ├── state.ts                # GuardianRuntime：开关、gate 覆盖、会话状态
 │   │   ├── commands.ts             # /perm 命令与 --perm flag
-│   │   └── startup.ts              # session_start / before_agent_start / model_select 处理
+│   │   ├── startup.ts              # session_start / before_agent_start / model_select 处理
+│   │   ├── user-bash.ts            # user_bash → 统一决策管线 → BashResult 适配
+│   │   └── subagents.ts            # 进程级子代理 session registry 与策略切换
 │   ├── config/
 │   │   ├── schema.ts               # zod schema（唯一真源）
 │   │   ├── paths.ts                # 全局/项目配置路径解析
@@ -142,6 +146,8 @@ interface GuardianRuntime {
   breaker: BreakerState;
   callIndex: number;             // 单调递增的调用序号（供预评分滞后判定）
   classifier: ClassifierState;
+  // 子会话 ID registry 在 extension/subagents.ts 的进程级状态中，不放进会话 runtime
+  isSubagentSession: boolean;
 }
 ```
 
@@ -152,7 +158,9 @@ interface GuardianRuntime {
 | `before_agent_start` | 重新读配置（支持热改）、检测模型变化是否影响评审可用性、更新状态栏 |
 | `turn_start` | 重置熔断器 |
 | `tool_call` | 决策管线（见 §4） |
+| `user_bash` | 用户直接执行命令的决策入口（见 §4.0.1） |
 | `tool_result` | 若预评分启用，异步调度轨迹评分（非阻塞） |
+| `subagents:child:session-created` / `bound` / `disposed` | 注册/校验/清除子会话 ID，供 `subagentPolicy` 使用 |
 | `session_shutdown` | 清空 grants / cache / breaker / 释放 parser |
 
 配置读取时机：**在 `session_start` 与 `before_agent_start` 各刷新一次**（重新读磁盘 + 重新合并），既支持会话间的配置修改，也支持会话内 `/perm reload`。不在扩展工厂阶段读配置，因为此时 `ctx`（及项目信任状态）尚不可用。
@@ -183,6 +191,7 @@ tool_call(event, ctx)
  │
  ├─ 6. 规则求值 evaluate(facts) ─► 各对象的 action
  │      未命中 ──► defaultAction（按 surface 矩阵，默认 read→allow / 其余→review）
+ │      若存在 unresolved 且至少一个可信对象明确 deny ──► ask
  │      多个已解析命令单元同时得到 allow 与 deny
  │        ──► onMixedCommandActions（默认 deny）
  │      未触发混合冲突 ──► 所有对象取最严格者
@@ -195,7 +204,7 @@ tool_call(event, ctx)
  │
  ├─ 8. 人工确认（ask 或 review 升级而来）
  │      hasUI=false ──► onAskWithoutUI（默认 deny）
- │      选择结果 ──► 仅此次 / 会话授权 / 拒绝 / 拒绝并说明
+ │      选择结果 ──► 仅此次 / 会话授权（仅人工）/ 拒绝 / 拒绝并说明
  │
  ├─ 9. 出结论：allow ──► undefined
  │            deny  ──► { block: true, reason }
@@ -217,6 +226,19 @@ gate 决定"哪些工具调用进入规则求值"，**不是**"哪些调用会�
 
 因此设计为：**默认全量评估内置工具，用默认动作矩阵控制评审成本**。
 
+### 4.0.1 `user_bash` 适配
+
+`!command` 与 `!!command` 不会产生 `tool_call`；pi 在直接执行前触发 `user_bash`，事件携带命令、cwd 和 `excludeFromContext`。本插件在该事件中调用与 `tool_call` 相同的 `facts -> policy -> review -> decide` 内核，再映射执行结果：
+
+| 决策 | 执行适配 |
+|---|---|
+| `allow` | 返回 `undefined`，交给 pi 的正常 shell 路径执行 |
+| `deny` | 返回替代 `BashResult`（非零 `exitCode` + 理由），pi 记录结果但不启动真实命令 |
+| `ask` | 通过 `ctx.ui` 请求人工确认；无 UI 时按 `onAskWithoutUI` |
+| `review` | 按 `userBashPolicy` 自动审核；失败按 `onReviewUnavailable` |
+
+`!!` 只是让 pi 在记录替代结果时保持 `excludeFromContext=true`，安全裁决与 `!` 完全相同。`user_bash` 不受 `gate` 影响，因为 gate 描述的是 Agent 工具面；只要 `userBashPolicy.enabled=true` 就进入管线。评审模型 allow 只能放行当前命令，不能创建会话授权。
+
 ### 4.1 为什么把 restrictiveness 放在"跨层"而不是"层内"
 
 层内用 **last-match-wins**（后写覆盖先写）是必须的：否则用户无法在一条宽泛的 `rm * → review` 之后写 `rm -rf ./node_modules → allow` 例外。
@@ -237,9 +259,10 @@ gate 决定"哪些工具调用进入规则求值"，**不是**"哪些调用会�
 同一 surface 内可能有**多条**规则命中（多命令单元、多个路径各自命中）。规则：
 
 1. 每个被裁决对象（命令单元 / 路径）**独立**求值，取各自命中的最严动作。
-2. facts 可信时，如果同一 shell 调用的多个命令单元中同时存在裁决结果为 `allow` 和 `deny` 的单元，则整个调用的动作改为 `onMixedCommandActions`（默认 `deny`，可配置 `ask` / `review` / `deny`）。
-3. 未触发上述混合冲突时，整个调用的最终动作 = 所有对象动作的**最严格者**。
-4. 只要有任意对象是 `unresolved`，整个调用走 `onUnresolvedFacts`。
+2. 如果存在 `unresolved` facts，且至少一个可信对象明确得到 `deny`，整个调用固定为 `ask`（FR-61）。
+3. 没有上述组合时，如果同一 shell 调用的多个命令单元中同时存在裁决结果为 `allow` 和 `deny` 的单元，则整个调用的动作改为 `onMixedCommandActions`（默认 `deny`，可配置 `ask` / `review` / `deny`）。
+4. 未触发上述冲突时，整个调用的最终动作 = 所有对象动作的**最严格者**。
+5. 只要有任意对象是 `unresolved` 且没有明确 `deny`，整个调用走 `onUnresolvedFacts`。
 
 对象内部的"never-weaker"原则仍是护栏正确性的核心不变量：
 
@@ -398,14 +421,16 @@ interface CompiledRule {
 
 | 配置段 | 职责 | 关键约束 |
 |---|---|---|
-| `enabled` / `yoloMode` / `reviewLog` / `debugLog` | 总开关、逃生舱、日志级别 | `yoloMode=true` 时所有 `ask`/`review` 重写为 `allow`，状态栏必须显著提示（FR-53） |
+| `enabled` / `yoloMode` / `auditLog` / `debugLog` | 总开关、逃生舱、日志级别 | `yoloMode=true` 时所有 `ask`/`review` 重写为 `allow`，状态栏必须显著提示（FR-53）；审计日志按日切分并默认保留 14 天 |
 | `gate` / `extraTools` | 评估范围（architecture §4.0） | `side-effect` 覆盖全部 pi 内置工具；自定义/MCP 工具需 `all` 或 `extraTools` |
 | `onReviewUnavailable` / `onUnresolvedFacts` / `onAskWithoutUI` | 三个失败分支的动作（§9） | 默认分别为 `deny` / `review` / `deny` |
 | `onMixedCommandActions` | 同一 shell 调用跨命令单元出现 `allow` / `deny` 冲突时的调用级动作 | 默认 `deny`，可选 `ask` / `review` / `deny`；global/default 定义基线，project 只能收紧 |
 | `reviewer` | 评审模型、deadline、证据循环、风险门槛 | `model` 必填；`maxAllowRiskLevel` 实现 FR-23 |
+| `userBashPolicy` | 用户直接执行 `!command` / `!!command` 的开关、自动审核与模型 | 跨层时 `enabled=true` 和 `autoReview=false` 优先；模型可显式覆盖；deny 使用替代 `BashResult` 阻断 |
 | `classifier` | 非阻塞预评分 | `enabled` 默认 `false`（D8） |
 | `circuitBreaker` | 同轮连续/窗口内拒绝阈值 | 阈值 0 表示关闭该条件 |
 | `cache` / `sessionGrants` | 判定缓存与会话授权记忆 | 仅内存；不缓存 `unavailable` |
+| `subagentPolicy` | 子代理默认动作与会话授权开关 | 跨层时 `enabled=true`、`allowSessionGrants=false` 优先，`defaultAction` 按 `deny > ask > review` 取最严格者；不共享父子状态 |
 | `workingDirectory` | 允许根目录、只读命令白名单 | `allowRoots` 用于 monorepo 兄弟目录；`readOnlyCommands` 实现 FR-9 |
 | `permission` | 规则表（按 surface 组织） | 见下 |
 
@@ -574,6 +599,7 @@ interface GrantKey {
 - 由 `facts` 生成建议模式：取路径或命令的稳定前缀（如 `rm -rf ./dist` → `rm -rf ./dist*`），使"批准一条命令"与"批准一类命令"的边界对用户可见。
 - 记忆范围：**本会话**，内存态，`session_shutdown` 清空。
 - 提示中展示建议模式供用户确认，避免"批准一条命令等于批准一整类命令"的隐性授权扩张。
+- **只有人工选择"本会话允许此类"才能创建或更新 grant**。评审模型 allow、缓存、预评分和用户手输 `!command` 本身都不写入授权。
 
 ### 8.2 判定缓存（FR-31~33）
 
@@ -610,6 +636,16 @@ key = sha256([
 - **只允许用于放行，永不产生 deny**（FR-36）。因此它的语义弱化是"先放行、后判定"，必须默认关闭并在开启时提示。
 - 三个失活条件：评分失败记为 `failure`（不是 low）；最新评分对应的 `callIndex` 落后当前超过 `maxLag`；`authorizationVersion` 不匹配。
 
+### 8.5 子代理会话策略（FR-56）
+
+- 当前对接基线为 `@gotgenes/pi-subagents` v21.7.1；子会话默认继承父 extensions，但 `excludedExtensionPackages` 可以把它排除。
+- `extension/subagents.ts` 在进程级 registry 中，通过 `subagents:child:session-created` / `disposed` 按 `sessionId` 标记子会话。该 registry 不能用 `GuardianRuntime` 的会话内 Map 代替，因为父扩展实例注册的事件必须能被随后绑定的子扩展实例读取。
+- 当前 `ctx.sessionManager.getSessionId()` 命中 registry 后启用 `subagentPolicy`。
+- 子扩展在自身 `session_start` 向 `pi.events` 发一个带 `sessionId` 的绑定握手；父实例收到 `subagents:child:bound` 后核对 registry 中是否已有握手。缺失时输出显式告警，覆盖 `excludedExtensionPackages` 把护栏排出的情况。
+- 子代理默认动作只能配置为 `deny` / `ask` / `review`，默认 `review`，不能通过该段放宽为 `allow`。
+- `allowSessionGrants=false` 时，子代理既不能使用父会话授权，也不能创建自己的会话授权。
+- 授权、缓存和熔断本来就是会话内存；父子会话不共享。无法识别子代理时必须由 `/perm status` 明确显示"未识别，使用父策略"，不能静默宣称已启用。
+
 ## 9. 失败语义矩阵
 
 | 场景 | 默认行为 | 可配置项 | 理由文本要求 |
@@ -622,6 +658,7 @@ key = sha256([
 | verdict 输出非法 | `deny` | `onReviewUnavailable` | 说明"评审未给出可解析的结论" |
 | 模型 deny | `deny` | — | 含风险点 + 反规避条款（FR-26） |
 | 规则 deny | `deny` | — | 含命中的规则模式与自定义 reason |
+| 同一调用同时出现 `unresolved` 和明确 `deny` | `ask` | — | 说明哪些对象无法静态确定、哪些对象明确拒绝（FR-61） |
 | 同一 shell 调用跨命令单元同时出现 `allow` / `deny` | `deny` | `onMixedCommandActions` | 列出冲突的命令单元、各自的裁决与命中规则 |
 | 需要人工确认且无 UI | `deny` | `onAskWithoutUI` | 说明"无交互界面可确认" |
 | 配置解析失败 | `allow` 抬升为 `review` | — | 提示用户配置有误并给出错误定位 |
@@ -651,7 +688,8 @@ key = sha256([
 }
 ```
 
-- 落盘为 JSONL，权限 0600，按日期切分。
+- 落盘为 JSONL，权限 0600，按进程本地日期切分为 `guardian-YYYY-MM-DD.jsonl`。
+- 默认保留 14 个自然日，`auditLog.retentionDays` 可配置；启动和跨日首次写入前清理更早文件，清理失败只告警。
 - `write` / `edit` 的 `content` 只记 `{length, sha256}`；命中敏感路径规则时不记录内容（FR-44）。
 - 写盘在决策返回**之后**异步进行，不进入关键路径。
 - `debugLog` 额外记录 facts 全文与提示词，用于排查误判；默认关闭（提示词可能含会话内容）。
@@ -675,6 +713,7 @@ pi.appendEntry("pi-permission-guardian.decision.v1", {
 {
   "name": "pi-permission-guardian",
   "version": "0.1.0",
+  "license": "Apache-2.0",
   "type": "module",
   "engines": { "node": ">=22" },
   "keywords": ["pi-package", "pi-extension", "permissions", "policy", "guardrail", "security"],
@@ -719,7 +758,7 @@ pi install git:github.com/<owner>/pi-permission-guardian@v0.1.0
 
 ### 11.3 安装后自检
 
-`/perm status` 输出应包含：开关状态、gate 覆盖面、评审模型与可用性、tree-sitter 是否就绪、当前配置来源与规则条数、熔断/缓存计数。这份信息同时是验收排查的第一手材料。
+`/perm status` 输出应包含：开关状态、gate 覆盖面、评审模型与可用性、`userBashPolicy` 状态、子代理识别与实际策略、tree-sitter 是否就绪、当前配置来源与规则条数、熔断/缓存计数。这份信息同时是验收排查的第一手材料。
 
 ## 12. 测试策略
 
@@ -727,21 +766,24 @@ pi install git:github.com/<owner>/pi-permission-guardian@v0.1.0
 |---|---|---|
 | `facts/bash` | 语料库驱动：`test/fixtures/*.txt` 每行一条命令 + 期望 facts（JSON） | FR-11~FR-15。语料必须包含：管道、`&&`、命令替换、子 shell、heredoc、`<>`、`sudo`/`xargs`/`bash -c`、变量拼接、Windows 路径与 `/c/...` MSYS 形式 |
 | `facts` 路径 | 表驱动 | FR-16/17，含 Windows 大小写与分隔符、符号链接双形 |
-| `policy` | 纯函数单测 | FR-1~FR-10、FR-59，重点是 last-match-wins、跨层最严格者合并与混合命令冲突 |
+| `policy` | 纯函数单测 | FR-1~FR-10、FR-59、FR-61，重点是 last-match-wins、跨层最严格者合并、混合命令冲突与 `unresolved + deny -> ask` |
 | `review/verdict` | 输入输出快照 | FR-21/22，覆盖围栏 JSON、前后缀噪声、缺字段、非法枚举值、非 JSON |
 | `config/jsonc` | 表驱动 | FR-49/50：带注释配置可加载；字符串内 `//` 不被剥离；**注入语法错误后断言报错行号与原文一致** |
 | `config` 整体 | 用提交的 `schemas/guardian.schema.json` 校验 `config/config.json`，并做一组负向用例 | FR-57/58：参考配置是严格 JSON、符合 schema；非法动作值 / 未知字段 / 越界数值均被拒绝 |
+| `audit/logger` | 临时目录 + 可控时钟 | FR-43：跨日切分、14 天保留边界、清理失败不阻塞裁决 |
 | `decision/pipeline` | 注入假 registry（假 `complete`）与假 UI | FR-23、FR-29~FR-38、§9 全部失败分支 |
-| 集成 | 构造假 `ExtensionAPI`/`ExtensionContext`，跑真实管线 | FR-39~FR-42、FR-46 |
+| 集成 | 构造假 `ExtensionAPI`/`ExtensionContext`，跑真实管线 | FR-39~FR-42、FR-46、FR-60 |
 | 手动冒烟 | 在真实 pi 会话中跑 S1~S7 | 交付验收（需求 §10） |
 
 必须存在的**负向测试**（护栏类项目的价值在此）：
 
 1. `rm -rf /` 在多命令单元组合中不被放过：`echo ok && rm -rf /`。
-2. 子代理不能成为绕过通道（后台子代理）。
+2. 子代理不能成为绕过通道（已识别子会话）。
 3. 评审不可用时不放行。
 4. 缓存不固化 `unavailable`。
 5. `deny` 后的同一工具重试必须走同步评审而非快路径。
+6. 评审模型 allow 不创建会话授权。
+7. `!rm -rf /` 的 `user_bash` deny 只返回替代结果，真实命令未执行。
 
 ## 13. 实施里程碑
 
@@ -750,9 +792,9 @@ pi install git:github.com/<owner>/pi-permission-guardian@v0.1.0
 | **M1 骨架与配置** | package 结构、扩展入口、`/perm` 命令、config schema（zod）+ 加载/合并/规范化、`config/jsonc.ts`、参考配置 `config/config.json` 与 `docs/configuration.md`、审计日志 | `/perm status` 可用；参考配置是严格 JSON 且通过 schema 校验；JSONC 输入的错误行号与原文对齐（FR-50）；配置非法时 fail-closed |
 | **M2 事实层** | tree-sitter 集成与预热、命令枚举、包装器与重定向、路径提取与归一化 | 语料库测试通过；`unresolved` 标记正确 |
 | **M3 规则层** | glob、规则表、求值、跨层合并、会话授权记忆 | FR-1~FR-10 全绿；管线可仅靠名单工作 |
-| **M4 评审层** | 提示词、verdict 三段式、证据循环、deadline、失败分类、门槛 | FR-19~FR-28 全绿；S3/S6 场景通过 |
+| **M4 评审层** | 提示词、verdict 三段式、证据循环、deadline、失败分类、门槛、`user_bash` 适配 | FR-19~FR-28、FR-60 全绿；S3/S6 场景通过 |
 | **M5 降本机制** | 缓存、熔断器、预评分、状态栏与对话框 | FR-29~FR-38、FR-41/42 全绿 |
-| **M6 子代理覆盖** | 前台/后台子代理的加载验证与文档、子代理专用策略 | FR-54~FR-56 全绿 |
+| **M6 子代理覆盖** | child lifecycle 识别、加载校验与告警、子代理专用策略 | FR-54~FR-56 全绿 |
 | **M7 分发** | pi package 打包、schema 生成、README、CI（typecheck + test） | 可从 npm/git 安装并正常加载 |
 
 ## 14. 风险
@@ -762,7 +804,7 @@ pi install git:github.com/<owner>/pi-permission-guardian@v0.1.0
 | bash 静态分析的绕过空间 | 护栏被误认为完备，实际存在缺口 | 明确"非沙箱"定位（N1）；`unresolved` 一律降级不放过；负向测试固化 |
 | 评审延迟叠加在关键路径 | 用户感知变卡 | 名单命中路径零模型调用；20s deadline；缓存与授权记忆；预评分（可选） |
 | 弱模型 verdict 质量 | 错放或错拦 | `maxAllowRiskLevel` 门槛（FR-23）；结构化输出（FR-22）；反规避条款 |
-| 前台子代理不加载 ambient 扩展 | 沉默的安全缺口 | 文档显著说明 + 提供 `extensions` 配置片段（FR-55）；列入自检输出 |
+| 子代理实现未发出可识别 lifecycle 或未加载本插件 | 子代理可能不受策略约束 | 文档与 `/perm status` 显式报告识别结果；按实际子代理版本验证加载路径（FR-55/56） |
 | `tool_call` handler 成为进程内单点 | 插件异常影响所有工具调用 | 最外层 try/catch 显式返回 block；单元测试覆盖异常路径 |
 | 与 pi 上游 API 演进的耦合 | `complete` 等 API 未在文档中正式条目化 | 用最小 API 面（`find` / `complete`）；`peerDependencies` 声明下限；集成测试用真实 pi 版本 |
 | 与其他 `tool_call` 拦截型扩展共存 | 双重决策或重复弹窗 | 护栏行为全部经 `/perm status` 可观察；README 明确列出已知的同类型扩展及其影响 |

@@ -12,7 +12,7 @@ pi agent 的命令执行护栏插件：**黑白名单快速裁决 + 名单外/�
 
 | 文档 | 内容 |
 |---|---|
-| [docs/requirements.md](docs/requirements.md) | 背景、目标与非目标、用户场景、功能需求（FR-1~FR-58）、设计决策（D1~D17）、约束与已知限制 |
+| [docs/requirements.md](docs/requirements.md) | 背景、目标与非目标、用户场景、功能需求（FR-1~FR-61）、设计决策（D1~D25）、约束与已知限制 |
 | [docs/architecture.md](docs/architecture.md) | 模块划分、决策管线、事实提取、规则引擎、评审器、降本机制、失败语义矩阵、打包与测试策略 |
 | [docs/configuration.md](docs/configuration.md) | 全部配置字段的语义、规则编排顺序、surface 与默认动作矩阵 |
 
@@ -30,6 +30,10 @@ pi agent 的命令执行护栏插件：**黑白名单快速裁决 + 名单外/�
 跨作用域合并时**最严格者胜**（`deny > ask > review > allow`）；同一作用域内**后写的规则覆盖先写的**（last-match-wins，所以具体规则必须写在宽泛规则之后）。
 
 Schema：[`schemas/guardian.schema.json`](schemas/guardian.schema.json)。
+
+## 许可证
+
+本项目使用 Apache License 2.0，全文见 [`LICENSE`](LICENSE)。
 
 ## 参考源码
 
