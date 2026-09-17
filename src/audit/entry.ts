@@ -33,4 +33,6 @@ export interface DecisionEntry {
   verdict?: "allow" | "deny" | "unavailable";
   evidenceRounds?: number;
   reason?: string;
+  /** 命中只读档案但免评审被取消的原因（FR-69，`kind` 或 `kind:detail`）。 */
+  readOnlyCancel?: string;
 }

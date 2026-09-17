@@ -11,6 +11,8 @@ import {
   type LayerRules,
   normalizeLayerRules,
 } from "./normalize.ts";
+import { expandReadOnly } from "./readonly.ts";
+import type { ReadOnlyCommandProfile } from "../facts/types.ts";
 
 /**
  * 跨层合并（FR-6、FR-59、FR-60、FR-56）。
@@ -84,6 +86,13 @@ export interface ResolvedConfig extends Omit<GuardianConfig, "permission"> {
   ruleCount: number;
   /** baseline 合成规则条数，供 `/perm status` 分开显示。 */
   baselineRuleCount: number;
+  /**
+   * 展开后的只读命令档案（FR-65）：用户条目 → 内置分组 → 旧 `readOnlyCommands` 条目，
+   * **顺序即优先级**（第一个命中的档案生效）。事实层只消费这个列表，不读配置。
+   */
+  readOnlyProfiles: ReadOnlyCommandProfile[];
+  /** 写入不算副作用的**额外**目标（FR-67）；内置空设备（`/dev/null`、win32 的 `NUL`）由事实层按平台补充。 */
+  writeSinks: string[];
 }
 
 /** 由合并逻辑显式接管、不参与通用深合并的顶层键。 */
@@ -323,6 +332,28 @@ export function mergeLayers(layers: readonly LoadedLayer[]): ResolvedConfig {
     (layer) => layer.status === "degraded" || layer.status === "invalid",
   );
 
+  // 只读名单的跨层合并（FR-65）：
+  // - `profiles` / `commands` 由通用深合并处理（更具体的层覆盖，与 `readOnlyCommands` 既有语义一致）；
+  // - `unsafeOptions` 取各层并集：它只能减少免评审，合并方向必须是“只收紧”；
+  // - `sinks` 取各层交集（只有显式写了该字段的层投票）：追加 sink 等于放宽，不能让下层单方面扩大。
+  if (contributing.length > 0) {
+    const unsafeVotes = contributing
+      .map((layer) => explicitReadOnlyList(layer, "unsafeOptions"))
+      .filter((value): value is string[] => value !== undefined);
+    if (unsafeVotes.length > 0) {
+      merged.workingDirectory.readOnly.unsafeOptions = [...new Set(unsafeVotes.flat())];
+    }
+    const sinkVotes = contributing
+      .map((layer) => explicitReadOnlyList(layer, "sinks"))
+      .filter((value): value is string[] => value !== undefined);
+    if (sinkVotes.length > 0) {
+      const first = sinkVotes[0] as string[];
+      merged.workingDirectory.readOnly.sinks = sinkVotes
+        .slice(1)
+        .reduce((acc, list) => acc.filter((value) => list.includes(value)), [...first]);
+    }
+  }
+
   // FR-63 / D26：失效层可能正是丢掉 `reviewer.model` 的那一层，“评审不可用”在这里是配置损坏的
   // 后果，不是风险结论。因此当没有任何层显式设置该字段时，连同默认值一起回退为 `ask`。
   // 这是一次**默认值**修正，不是对用户显式决定的覆盖：只要有一层写过就用它抢救后的值
@@ -339,6 +370,7 @@ export function mergeLayers(layers: readonly LoadedLayer[]): ResolvedConfig {
   ];
 
   const { permission: _permission, ...rest } = merged;
+  const readOnly = expandReadOnly(merged.workingDirectory);
 
   return {
     ...rest,
@@ -347,7 +379,29 @@ export function mergeLayers(layers: readonly LoadedLayer[]): ResolvedConfig {
     degraded,
     ruleCount: countRules(rules),
     baselineRuleCount: countBaselineRules(rules),
+    readOnlyProfiles: readOnly.profiles,
+    writeSinks: readOnly.writeSinks,
   };
+}
+
+/** 读取一层 `workingDirectory.readOnly` 里的字符串数组字段（只有显式写了才返回）。 */
+function explicitReadOnlyList(
+  layer: LoadedLayer,
+  key: "unsafeOptions" | "sinks",
+): string[] | undefined {
+  const working = layer.raw?.["workingDirectory"];
+  if (!isPlainObject(working)) {
+    return undefined;
+  }
+  const readOnly = working["readOnly"];
+  if (!isPlainObject(readOnly)) {
+    return undefined;
+  }
+  const value = readOnly[key];
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  return value.filter((item): item is string => typeof item === "string" && item.length > 0);
 }
 
 function layerRecord(layers: readonly LoadedLayer[]): Record<ConfigLayerName, LoadedLayer> {

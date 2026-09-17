@@ -19,7 +19,7 @@ pi agent 的命令执行护栏插件：**黑白名单快速裁决 + 名单外/�
 
 | 会话里的动作 | 命中的规则 | 观察到的结果 |
 |---|---|---|
-| `ls -la` | 内置只读命令白名单（FR-9） | `decision: allow, source: policy`，命令真实执行，全程**零模型调用** |
+| `ls -la` | 内置只读档案（FR-9 / FR-65） | `decision: allow, source: policy`，命令真实执行，全程**零模型调用** |
 | `rm -rf ./dist` | 项目层 `"rm -rf ./dist*": "deny"` | `decision: deny, source: policy, matchedPattern: rm -rf ./dist*`；返回 `exitCode: 1`，`dist/sentinel.txt` 仍然存在——**拦截发生在工具执行前** |
 | 未配置 `reviewer.model` 时的任意非白名单命令 | 默认动作 `review`，评审不可用 | `decision: deny, source: policy, verdict: unavailable`，理由明确写"评审未完成……**不代表该动作因风险被拒绝**" |
 
@@ -48,7 +48,7 @@ pi agent 的命令执行护栏插件：**黑白名单快速裁决 + 名单外/�
   <img src="./assets/readme/decision-pipeline.svg" width="100%" alt="决策管线：facts（tree-sitter-bash 解析出命令单元与路径）→ policy（glob 规则、只读白名单、默认动作矩阵）→ review（仅名单未命中或标记 review 时交给独立评审模型）→ decide（allow 放行、ask 人工、deny 拦截）；名单命中时从 policy 直连 decide 跳过评审，失败分支默认 fail-closed，审计等后置动作不阻塞决策。">
 </p>
 
-- **名单命中即裁决**：glob 规则与只读命令白名单命中时直接放行或拦截，零模型调用、零弹窗。
+- **名单命中即裁决**：glob 规则与只读命令档案命中时直接放行或拦截，零模型调用、零弹窗。档案会声明“哪个参数是搜索模式、哪个是路径、哪些选项会写文件或执行程序”，因此 `rg -n "…" src/`、`git status`、`ls 2>/dev/null` 默认免评审，而 `rg --pre …`、`find . -delete`、`git branch -D x` 不会（`docs/configuration.md` §7）。
 - **名单外交给评审**：由配置 `reviewer.model` 指定的独立评审模型判断。它只能来自 pi 模型配置文件并经 model registry 使用，插件不自行选择接口协议，也不覆盖 `baseUrl`、认证与 headers（D6）。
 - **模型结论之上还有底线**：`allow` 且风险等级超过 `reviewer.maxAllowRiskLevel`（默认 `medium`）时转人工确认，`deny` 直接拦截；`deny` 不提供当场申诉通道，改配置才是正解（D12 / D16）。
 - **不确定落到安全分支**：解析失败、评审超时/不可用、输出非法都走已知的安全分支，绝不静默放行；理由文本会写明"评审未完成"，避免 agent 学到错误结论（FR-27）。
@@ -114,9 +114,11 @@ Schema：[`schemas/guardian.schema.json`](schemas/guardian.schema.json)。
 
 本插件是**策略护栏，不是沙箱**（需求 N1）：它只裁决 pi 发起的工具调用，不对操作系统做隔离，也不阻止其他进程。已知边界：
 
-- **静态分析的固有限制**：shell 别名不展开、`eval` / `bash -c` 内部字符串无法静态得知、非字面 `cd` 之后的相对路径无法解析、变量拼接的路径不可知；大括号展开与 glob 通配符按字面处理；`~user/x`、`${VAR:-default}`、`$((…))` 不猜值。这些一律标记 `unresolved`，按 `onUnresolvedFacts`（默认 `review`）处理，**不会放行**。
+- **静态分析的固有限制**：shell 别名不展开、`eval` / `bash -c` 内部字符串无法静态得知、变量拼接的路径不可知；大括号展开与 glob 通配符按字面处理；`~user/x`、`${VAR:-default}`、`$((…))` 不猜值。这些一律标记 `unresolved`，按 `onUnresolvedFacts`（默认 `review`）处理，**不会放行**。字面 `cd <路径>` 之后的相对路径已按 bash 作用域跟踪（FR-70），且 `cd` **进项目内目录**本身免评审（`nav` 分组，`cd src && rg -n x` 整条 allow）；`cd ..` / `cd /tmp` / `cd ~` / 无参数 `cd` / `cd -` / `popd` 不免评审，`cd -` / `cd $DIR` / `popd` 之后不可静态确定，该作用域内的后续单元一律降级。
 - **没有 PowerShell 解析器**：`powershell` 命令整体不可静态展开，规则最多给到 `review` / `ask`，不会单独给出 `allow` / `deny`。
-- **只读白名单是有意的窄集合**：只收逐个核实过没有写文件选项的命令（`pwd` / `ls` / `cat` / `head` / `tail` / `wc` / `git status`，以及按用户决策保留的 `git diff` / `git log` / `git show`）。`git diff --output out.txt`（空格写法、值不像路径）是已知残余面，可用 `"git diff --output*": "review"` 封死。
+- **免评审是启发式的名单，不是沙箱**：命中只读档案（`workingDirectory.readOnly`，FR-65~FR-67）的命令免评审放行，但名单只看 **argv**，不建模 shell 别名、PATH 劫持，也不覆盖工具自身配置注入的执行点（如 `RIPGREP_CONFIG_PATH` 里写 `--pre`、`GIT_EXTERNAL_DIFF`、`git config core.pager`）。默认内置分组是 `search`（`rg` / `grep` / `find`）、`vcs-read`（git 只读子命令）、`nav`（`cd`/`pushd`，仅项目内）、`text-read`、`print`（`echo`/`printf`）与 `system`（`date`/`which`/`command -v`…），每一组都逐条核实过“选项即程序”类危险选项（`--pre` / `--compress-program` / `--ext-diff` / `-c`）；`sed` / `awk` / 裸 `node` / 网络类命令**不**进名单，需要时请自己写 `readOnly.commands`（`docs/configuration.md` §7.5 给了 `sed` 的保守写法）。
+- **透明前缀会被跳过**：`timeout 5 cat f`、`nice -n 5 rg x src`、`env FOO=1 rg x src`、`command cat f` 按内层命令判定（最多 3 层）；`sudo` / `xargs` / `bash -c` / `timeout 5 $CMD` 仍是不透明包装器。内层命令文本同样参与规则匹配，因此 `timeout 30 rm -rf ./dist` 不会被 `rm -rf ./dist*` 规则放过。
+- **“未知命令恒评审”是有意的**：没声明档案的命令逐次走评审（D29），不会因为“看起来只读”就放行；想减少评审就给它们写档案，或把分组配上（默认已开 `search` / `vcs-read` / `nav` / `text-read` / `print` / `system`，可选 `text-tools`（sort/diff/jq…）、`meta`（版本查询））。
 - **UNC 路径不做 realpath**：`\\server\share\x` 只做词法归一，避免对网络位置发起 SMB 访问而阻塞 `tool_call`。
 - **Windows 下日志权限位被忽略**：`0600` 只在 POSIX 生效。
 - **`user_bash` 共存只提示不接管**：检测到其他拦截器的声明冲突时会提示，但不调整加载顺序；未参与声明的先前拦截器属于不可观测边界。

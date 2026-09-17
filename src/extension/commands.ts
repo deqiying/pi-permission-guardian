@@ -211,6 +211,19 @@ export function renderStatusReport(
         : `｜额外工具：${config.extraTools.join(", ")}`
     }`,
   );
+
+  // 只读免评审是“为什么这条命令没去评审”的直接答案，因此档案面必须可见（FR-69）。
+  const readOnly = config.workingDirectory.readOnly;
+  lines.push(
+    `- 只读档案：内置分组 ${
+      readOnly.profiles.length === 0 ? "（已关闭）" : `[${readOnly.profiles.join(", ")}]`
+    }｜自定义 ${readOnly.commands.length} 条｜旧白名单 ${config.workingDirectory.readOnlyCommands.length} 条｜共展开 ${
+      config.readOnlyProfiles.length
+    } 条档案｜额外写入 sink ${config.writeSinks.length} 个（内置 /dev/null、win32 下的 NUL 始终生效）`,
+  );
+  if (readOnly.unsafeOptions.length > 0) {
+    lines.push(`- 全局选项黑名单：${readOnly.unsafeOptions.join(", ")}`);
+  }
   lines.push(
     `- 评审模型：${describeReviewer(
       config.reviewer.model,

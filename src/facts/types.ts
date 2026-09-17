@@ -62,9 +62,65 @@ export interface CommandUnit {
   executable?: string;
   paths: PathTarget[];
   viaWrapper?: "opaque" | "indirection";
+  /**
+   * 透明前缀内推（FR-12 修订）时内层命令的文本（`timeout 5 cat f` → `cat f`）。
+   *
+   * 它作为规则匹配的**额外目标**，因此外层包装不会让 `rm -rf` 这类用户规则失效；
+   * 与 `viaWrapper` 互斥：内推成功就不再是不透明对象。
+   */
+  unwrappedText?: string;
   unresolved?: UnresolvedCause;
-  /** 命中只读命令白名单且没有写副作用（FR-9），命中即可免评审放行。 */
+  /** 命中只读命令档案且没有写副作用（FR-9 / FR-65），命中即可免评审放行。 */
   readOnly: boolean;
+  /**
+   * 命中了档案但免评审被取消的原因（FR-69），格式 `kind` 或 `kind:detail`。
+   *
+   * 与 `readOnly=false` 的区别：`readOnly=false && readOnlyCancel === undefined` 表示
+   * “没有命中任何档案”（本来就不在白名单里），有 `readOnlyCancel` 才说明“本来能免评审，但被这条挡住了”。
+   */
+  readOnlyCancel?: string;
+}
+
+/** 只读档案里位置参数的角色（FR-65）。 */
+export type ReadOnlyRole =
+  /** 搜索模式、正则等“不是文件”的取值：不产出路径目标，动态取值也不影响免评审。 */
+  | "pattern"
+  /** 文件/目录路径：产出 read 方向的路径目标；动态取值时必须降级。 */
+  | "paths"
+  /** 一段**脚本代码**（如 `sed` 的程序体）：必须整体命中 `script` 模式集，否则取消免评审。 */
+  | "script";
+
+/**
+ * 一条只读命令档案（FR-65）。
+ *
+ * 字符串形态（旧的 `readOnlyCommands` 条目）等价于 `{ argv: [...], roles: ["paths"] }`，
+ * 因此旧配置的语义完全保留。字段全部可选的部分含义是“缺省即旧行为”。
+ */
+export interface ReadOnlyCommandProfile {
+  /** argv 前缀（可执行名 + 参数），与旧白名单条目同语义：“可执行名 + 参数前缀”。 */
+  argv: readonly string[];
+  /** 位置参数角色序列；缺省 `["paths"]`。最后一项吸收剩余位置参数。 */
+  roles?: readonly ReadOnlyRole[];
+  /** `script` 角色必须整体命中的正则集合（白名单式：不匹配即取消）。 */
+  script?: readonly string[];
+  /** 选项策略；缺省 `deny-list`（未列出的选项默认安全）。 */
+  optionPolicy?: "deny-list" | "allow-list";
+  /** allow-list 下视为安全的选项；在 deny-list 下同时豁免“值像路径的 `--opt=value`”。 */
+  safeOptions?: readonly string[];
+  /** 命中即取消免评审的选项（写文件、执行程序、改工作目录）。按词前缀匹配。 */
+  unsafeOptions?: readonly string[];
+  /** 档案来源：内置分组名 / `user` / `readOnlyCommands`（旧键展开）。用于审计展示。 */
+  group?: string;
+  /**
+   * 免评审要求**目标必须在项目根目录内**（缺省 `false`）。
+   *
+   * 用于 `cd` / `pushd` 这类“去哪里”的命令：进项目内部目录是只读操作，出到项目外
+   * （`cd /tmp`、`cd ~`、`cd ..`）就不是。要求同时满足“**至少一个位置参数**”与“**全部路径目标都非
+   * external**”；`cd` 无参数 = 回家目录、`popd` 的目标在栈顶不可知，两者都不满足。
+   */
+  onlyWithinRoots?: boolean;
+  /** 给人看的依据，展示在审计与人工确认提示里。 */
+  reason?: string;
 }
 
 export interface Facts {
@@ -98,4 +154,12 @@ export interface FactsContext {
   roots: string[];
   /** 只读命令白名单（FR-9）；空数组表示关闭白名单。 */
   readOnlyCommands: string[];
+  /**
+   * 结构化只读档案（FR-65）；缺省表示只有 `readOnlyCommands` 的旧口径。
+   *
+   * 由配置层展开（内置分组 + 用户条目 + 旧键等价档案），事实层只按它判定，不读配置。
+   */
+  readOnlyProfiles?: readonly ReadOnlyCommandProfile[];
+  /** 写入这些**额外**目标不算写副作用（FR-67）；内置空设备由事实层按平台补充。 */
+  writeSinks?: readonly string[];
 }

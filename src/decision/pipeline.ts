@@ -208,6 +208,7 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
     request: DecisionRequest,
     outcome: DecisionOutcome,
     latencyMs: number,
+    readOnlyCancel?: string,
   ): void {
     deps.runtime.callIndex += 1;
     const callIndex = deps.runtime.callIndex;
@@ -233,6 +234,7 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
         model: outcome.reviewerModel,
         verdict: outcome.verdict,
         evidenceRounds: outcome.evidenceRounds,
+        ...(readOnlyCancel === undefined ? {} : { readOnlyCancel }),
       });
     } catch (error) {
       // 审计只是观测面：写日志失败不能让裁决跟着失败。
@@ -252,6 +254,7 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
         verdict: outcome.verdict,
         evidenceRounds: outcome.evidenceRounds,
         reason: outcome.reason,
+        ...(readOnlyCancel === undefined ? {} : { readOnlyCancel }),
       });
     } catch (error) {
       // 会话内记录同样不进入关键路径。
@@ -397,6 +400,8 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
       home,
       roots: expandRoots(cwd, config.workingDirectory.allowRoots, home, platform),
       readOnlyCommands: config.workingDirectory.readOnlyCommands,
+      readOnlyProfiles: config.readOnlyProfiles,
+      writeSinks: config.writeSinks,
     };
 
     let facts: Facts;
@@ -423,6 +428,12 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
 
     const cacheKey = cacheKeyForCall(call, request, config, cwd);
 
+    // 免评审被取消的原因（FR-69）：命中档案但被选项/重定向/脚本规则挡住时记一笔，
+    // 让"为什么这条命令又去评审了"在审计里能直接回答。只作为观测字段传递，不进缓存对象。
+    const readOnlyCancel = call.evaluations
+      .map((evaluation) => evaluation.object.readOnlyCancel)
+      .find((value) => value !== undefined);
+
     let outcome: DecisionOutcome;
     try {
       outcome = await resolveOutcome({ call, facts, request, config, ctx, cacheKey });
@@ -434,7 +445,7 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
     }
     applyBreakerAccounting(outcome, toolName, config);
     storeCache(outcome, cacheKey, config);
-    record(ctx, request, outcome, Date.now() - started);
+    record(ctx, request, outcome, Date.now() - started, readOnlyCancel);
     return outcome;
   }
 
@@ -946,7 +957,7 @@ const LAYER_LABEL: Record<string, string> = {
 
 function describeRule(evaluation: ObjectEvaluation): string {
   if (evaluation.source === "read-only") {
-    return "命中只读命令白名单（FR-9）";
+    return "命中只读命令档案（FR-9 / FR-65）";
   }
   if (evaluation.source === "unresolved") {
     return "对象无法静态确定执行内容（FR-14）";
@@ -970,10 +981,16 @@ function describeReason(call: CallEvaluation, config: ResolvedConfig): string {
       return `同一调用的多个命令单元动作冲突，按 onMixedCommandActions=${config.onMixedCommandActions} 处理（FR-59）。`;
     case "unresolved":
       return `调用无法静态确定执行内容，按 onUnresolvedFacts=${config.onUnresolvedFacts} 处理。`;
-    case "objects":
-      return call.decisive === undefined
-        ? "没有对象对该调用表态，按放行处理。"
-        : describeRule(call.decisive);
+    case "objects": {
+      if (call.decisive === undefined) {
+        return "没有对象对该调用表态，按放行处理。";
+      }
+      const head = describeRule(call.decisive);
+      const cancel = call.decisive.object.readOnlyCancel;
+      return cancel === undefined
+        ? head
+        : `${head}；该命令命中只读档案，但免评审被取消（${cancel}，FR-69）`;
+    }
   }
 }
 

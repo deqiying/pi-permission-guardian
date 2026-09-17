@@ -306,6 +306,138 @@ const subagentPolicySchema = z
       "子代理会话的保守策略（FR-56）。v1 仅对接 @gotgenes/pi-subagents v21.7.1；只收紧默认动作矩阵，不影响用户显式规则、只读白名单与 onUnresolvedFacts。",
   });
 
+/** 内置只读档案的分组名（FR-65）；是配置面 `workingDirectory.readOnly.profiles` 的取值。 */
+export const READONLY_PROFILE_GROUPS = [
+  "search",
+  "vcs-read",
+  "nav",
+  "text-read",
+  "print",
+  "system",
+  "text-tools",
+  "meta",
+] as const;
+
+export type ReadOnlyProfileGroup = (typeof READONLY_PROFILE_GROUPS)[number];
+
+/**
+ * 默认开启的分组（D28）。
+ *
+ * 包含 agent 日常最高频的只读命令，目标是“常见组合命令整体免评审”：搜索（`rg`/`grep`/`find`）、
+ * git 只读子命令、目录导航（`cd`/`pushd`，仅项目内）、文本读取、只打印（`echo`/`printf`）、系统查询。
+ * 每一组都逐条核实过危险选项（`rg --pre`、`find -delete`、`git --output`、`tree -o`、`date -s`…）。
+ *
+ * 默认**不开**的两组：`text-tools`（sort/diff/jq…，写形态少但 jq 等未在本机逐条核实）与
+ * `meta`（版本查询，command 反而少见）；需要时用户在配置里加一行即可。
+ */
+export const DEFAULT_READONLY_PROFILE_GROUPS: readonly ReadOnlyProfileGroup[] = [
+  "search",
+  "vcs-read",
+  "nav",
+  "text-read",
+  "print",
+  "system",
+];
+
+const readOnlyRoleSchema = z
+  .enum(["pattern", "paths", "script"])
+  .meta({
+    description:
+      '位置参数的角色的取值：pattern（模式/正则，不是文件）、paths（文件路径，产出 read 目标）、script（脚本代码，必须整体命中 `script` 模式集）。',
+  });
+
+/** 单条只读命令档案：字符串形态 = `argv` 前缀 + 全部位置参数都是路径（FR-9 旧口径）。 */
+const readOnlyCommandEntrySchema = z.union([
+  z.string().min(1),
+  z
+    .strictObject({
+      argv: z
+        .array(z.string().min(1))
+        .min(1)
+        .meta({
+          description:
+            'argv 前缀（可执行名 + 参数），与字符串条目同语义；写一条更具体的条目可以压住内置档案（先到先得）。',
+        }),
+      roles: z.array(readOnlyRoleSchema).optional().meta({
+        description:
+          '位置参数角色序列，缺省 ["paths"]。最后一项吸收剩余位置参数；空数组表示不允许位置参数（`git branch <新分支名>` 这类会被取消免评审）。',
+      }),
+      script: z.array(z.string().min(1)).optional().meta({
+        description:
+          '仅 script 角色使用：整体锚定的正则白名单，不匹配即取消免评审。例如 sed 的 ["^[0-9]+(,[0-9]+)?p$"]。',
+      }),
+      optionPolicy: z.enum(["deny-list", "allow-list"]).optional().meta({
+        description:
+          '选项策略，缺省 deny-list（未列出的选项默认安全）。危险选项密集的命令（find / git branch）应使用 allow-list：只有 safeOptions 列出的选项才安全。',
+      }),
+      safeOptions: z.array(z.string().min(1)).optional().meta({
+        description:
+          'allow-list 下视为安全的选项；在 deny-list 下同时豁免“值像路径的 --opt=value”形状规则。',
+      }),
+      unsafeOptions: z.array(z.string().min(1)).optional().meta({
+        description:
+          '命中即取消免评审的选项（写文件 / 执行程序 / 改工作目录）。按词前缀匹配（--pre 同时覆盖 --pre-glob）。',
+      }),
+      onlyWithinRoots: z.boolean().optional().meta({
+        description:
+          '免评审要求目标必须在项目根目录内（缺省 false）。用于 cd / pushd 这类“去哪里”的命令：必须在至少一个位置参数，且全部路径目标都非 external，否则不免评审。',
+      }),
+      reason: z.string().min(1).optional().meta({
+        description: "人类可读依据，展示在审计与人工确认提示里。",
+      }),
+    })
+    .superRefine((value, ctx) => {
+      for (const pattern of value.script ?? []) {
+        try {
+          new RegExp(pattern);
+        } catch {
+          ctx.addIssue({
+            code: "custom",
+            message: `script 模式不是合法正则：${pattern}`,
+          });
+        }
+      }
+      if (
+        value.roles?.includes("script") === true &&
+        (value.script === undefined || value.script.length === 0)
+      ) {
+        ctx.addIssue({
+          code: "custom",
+          message:
+            'roles 里声明了 "script" 但没有给 script 模式集：该档案永远不会通过（fail-closed）。要放行请补上模式，或改用 pattern 角色。',
+        });
+      }
+    }),
+]);
+
+/** 结构化只读名单（FR-65~FR-67、D28）。 */
+const readOnlySchema = z
+  .strictObject({
+    profiles: z
+      .array(z.enum(READONLY_PROFILE_GROUPS))
+      .default([...DEFAULT_READONLY_PROFILE_GROUPS])
+      .meta({
+        description:
+          '启用的内置档案分组，默认 ["search","vcs-read","nav","text-read","print","system"]。可选：search（rg/grep/find）、vcs-read（git 只读子命令）、nav（cd/pushd，仅限项目内目录）、text-read（cat/head/ls/stat…）、print（echo/printf）、system（date/du/df/which/ps…）、text-tools（sort/diff/jq…）、meta（版本查询）。配 [] 表示不使用任何内置档案，只用自己的 commands。',
+      }),
+    commands: z.array(readOnlyCommandEntrySchema).default([]).meta({
+      description:
+        '自定义只读命令档案：字符串或对象。排在分组前面，因此可以压住内置档案。',
+    }),
+    unsafeOptions: z.array(z.string().min(1)).default([]).meta({
+      description:
+        '用户级全局选项黑名单：对所有档案（含内置分组与 readOnlyCommands 条目）生效，按词前缀匹配，命中即取消免评审。只收紧，不放宽。',
+    }),
+    sinks: z.array(z.string().min(1)).default([]).meta({
+      description:
+        '额外的“写入不算副作用”的目标（FR-67）。内置空设备 /dev/null 与 NUL 总是生效，这里只做追加。',
+    }),
+  })
+  .meta({
+    description:
+      "结构化只读命令档案（FR-65~FR-67）。与旧的字符串白名单 readOnlyCommands 并存：旧键语义不变，新键补充参数角色与选项名单。",
+  });
+
 const workingDirectorySchema = z.strictObject({
   allowRoots: z
     .array(z.string().min(1))
@@ -314,12 +446,13 @@ const workingDirectorySchema = z.strictObject({
       description:
         '视为"内部"的额外根目录。monorepo 场景可加入兄弟包路径，避免被判定为外部目录。',
     }),
+  readOnly: readOnlySchema.default(() => readOnlySchema.parse({})),
   readOnlyCommands: z
     .array(z.string().min(1))
     .default([...DEFAULT_READ_ONLY_COMMANDS])
     .meta({
       description:
-        '只读命令白名单（FR-9）：命中即 allow，不产生评审调用。内置集保持尽可能小且通用（面向工作目录的只读操作），匹配固定为“可执行名 + 参数前缀”，不为特殊选项增加分支。省略时使用内置集；显式配置数组时完整覆盖默认集，配置 [] 可关闭。例如 "git status" 匹配 `git status --short`，不匹配 `git push`。带路径值的 --opt=value 选项会取消该次调用的免评审资格；想连空格写法也封死，可加一条 "git diff --output*": "review"。',
+        '只读命令白名单（FR-9）：命中即 allow，不产生评审调用。内置集保持尽可能小且通用，匹配固定为“可执行名 + 参数前缀”，不为特殊选项增加分支。省略时使用内置集；显式配置数组时完整覆盖默认集，配置 [] 可关闭。例如 "git status" 匹配 `git status --short`，不匹配 `git push`。需要更精确的归因（模式不是路径、选项黑名单、脚本白名单）请用 readOnly。',
     }),
 });
 

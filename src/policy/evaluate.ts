@@ -44,8 +44,10 @@ export interface PolicyObject {
   primary: string;
   /** 路径对象的方向；命令与工具对象为 undefined。 */
   direction?: Direction;
-  /** 只读命令白名单命中且无写副作用（仅命令单元，FR-9）。 */
+  /** 只读命令档案命中且无写副作用（仅命令单元，FR-9 / FR-65）。 */
   readOnly: boolean;
+  /** 命中档案但免评审被取消的原因（FR-69），仅命令单元可能携带。 */
+  readOnlyCancel?: string;
   /** 该对象来自不可静态确定的构造，求值结果不可信（FR-14、FR-61）。 */
   unresolved?: UnresolvedCause;
   /** 供审计与人工提示展示的文本。 */
@@ -62,16 +64,25 @@ function commandObject(
   surface: string,
   compositeTexts: readonly string[],
 ): PolicyObject {
+  // 透明前缀内推（FR-12 修订）时，内层命令的文本也要参与规则匹配：
+  // `timeout 30 rm -rf ./dist` 必须能被 `rm -rf ./dist*` 这类规则命中。
+  const targets =
+    unit.unwrappedText === undefined
+      ? [unit.text, ...compositeTexts]
+      : [unit.text, unit.unwrappedText, ...compositeTexts];
   const object: PolicyObject = {
     kind: "command",
     surfaces: [surface],
-    targets: dedupe([unit.text, ...compositeTexts]),
+    targets: dedupe(targets),
     primary: unit.text,
     readOnly: unit.readOnly,
     label: unit.text,
   };
   if (unit.unresolved !== undefined) {
     object.unresolved = unit.unresolved;
+  }
+  if (unit.readOnlyCancel !== undefined) {
+    object.readOnlyCancel = unit.readOnlyCancel;
   }
   return object;
 }

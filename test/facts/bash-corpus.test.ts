@@ -25,6 +25,8 @@ interface CorpusCase {
   unresolved?: string;
   unresolvedUnits?: number[];
   wrappers?: Record<string, "opaque" | "indirection">;
+  /** 透明前缀内推（FR-12 修订）：下标 → 内层命令文本。 */
+  unwrapped?: Record<string, string>;
   readOnly?: number[];
   paths?: string[];
 }
@@ -100,6 +102,14 @@ describe("bash 语料：逐条 facts 断言", () => {
         }
       });
       expect(wrappers).toEqual(expected.wrappers ?? {});
+
+      const unwrapped: Record<string, string> = {};
+      facts.commands.forEach((unit, index) => {
+        if (unit.unwrappedText !== undefined) {
+          unwrapped[String(index)] = unit.unwrappedText;
+        }
+      });
+      expect(unwrapped).toEqual(expected.unwrapped ?? {});
 
       const readOnly = facts.commands
         .map((unit, index) => (unit.readOnly ? index : -1))

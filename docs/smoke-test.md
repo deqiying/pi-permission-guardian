@@ -1,6 +1,6 @@
 # M7 手动冒烟与平台边界
 
-> 状态：**部分执行**。已在 Windows 11 + pi 0.85.1 上跑完所有不依赖评审模型、弹窗与真实子代理会话的环节（安装 / 自动发现加载 / 自检 / 只读放行 / 规则拦截 / 评审不可用 / 非法配置 / 审计落盘 / 卸载）。
+> 状态：**部分执行**。已在 Windows 11 + pi 0.85.1 上跑完所有不依赖评审模型、弹窗与真实子代理会话的环节（安装 / 自动发现加载 / 自检 / 只读放行 / 规则拦截 / 评审不可用 / 非法配置 / 审计落盘 / 卸载），以及 M8（只读档案与免评审）的真实会话复现（§3.10）。
 > 需要真实评审模型、交互弹窗与真实子代理会话的场景（S3、S4 的工具路径、S5、S7 及 S6 的真实超时分支）**尚未执行**，见 §4。
 
 本文件对应 `docs/implementation-plan.md` §10（M7 工作项 5）与 `docs/requirements.md` §10 的验收总纲，给出 S1~S7 的复现步骤、已观察结果和未覆盖边界。自动化门禁（typecheck / test / schema 与配置校验 / 打包内容校验）见 §6，不在此处重复。
@@ -158,6 +158,66 @@ EOF
 {"ts":"…","sessionId":"…","toolCallId":"user_bash#2","callIndex":2,"toolName":"bash","surface":"bash","targets":["rm -rf ./dist"],"matchedPattern":"rm -rf ./dist*","action":"deny","source":"policy","latencyMs":2,"reason":"命中规则 …"}
 {"ts":"…","sessionId":"…","toolCallId":"user_bash#1","callIndex":1,"toolName":"bash","surface":"bash","targets":["echo hello-guardian"],"matchedPattern":"*","action":"deny","source":"policy","latencyMs":26,"reason":"评审模型未配置或无法解析…","verdict":"unavailable"}
 ```
+
+### 3.10 M8 只读档案与免评审（真实会话，2026-09，零模型调用）
+
+目标：在真实 pi 会话里确认 FR-65~FR-70 的落地效果 —— 高频只读命令免评审、危险写法仍被拦住、取消原因可在审计里读到。
+
+```bash
+export PI_CODING_AGENT_DIR=/tmp/agent PI_OFFLINE=1     # 隔离的 <agentDir>，内含参考配置
+{
+  printf '%s
+' '{"id":"b1","type":"bash","command":"rg -n readOnlyProfiles src | head -2"}'; sleep 5
+  printf '%s
+' '{"id":"b2","type":"bash","command":"ls 2>/dev/null | head -2"}'; sleep 5
+  printf '%s
+' '{"id":"b3","type":"bash","command":"rg --pre echo -n x src/config | head -2"}'; sleep 6
+} | pi --mode rpc --no-session -a -e <仓库路径>
+```
+
+观察到的裁决条目：
+
+| 命令 | 结果 |
+|---|---|
+| `rg -n readOnlyProfiles src \| head -2` | `decision: allow, source: policy, reason: 命中只读命令档案（FR-9 / FR-65）`，命令真实执行（`exitCode: 0` + 输出），**零模型调用** |
+| `ls 2>/dev/null \| head -2` | `decision: allow, source: policy`，同样真实执行（FR-67 的空设备 sink 生效） |
+| `rg --pre echo -n x src/config \| head -2` | `decision: deny, matchedPattern: "*", verdict: unavailable, readOnlyCancel: unsafe-option:--pre` —— 档案检查取消免评审（FR-66），随后评审不可用 → `onReviewUnavailable=deny`（fail-closed），命令未执行（替代结果 `exitCode: 1`） |
+
+审计落盘（`<agentDir>/extensions/pi-permission-guardian/logs/guardian-<date>.jsonl`）同样带 `readOnlyCancel: "unsafe-option:--pre"`，即"为什么又去评审"可以直接查（FR-69）。
+
+`/perm status` 新增行：
+
+```text
+- 只读档案：内置分组 [search, vcs-read]｜自定义 0 条｜旧白名单 10 条｜共展开 30 条档案｜额外写入 sink 0 个（内置 /dev/null、win32 下的 NUL 始终生效）
+```
+
+未在真实会话里覆盖：`git` 子命令族与自定义档案（已由 `test/facts/bash/readonly-profiles.test.ts` 的逐条行为表覆盖，含 `find -delete`、`git branch -D`、`git -c … status`、`sed -i` 等负向用例）。
+
+### 3.11 常见组合命令与透明前缀（真实会话，2026-09，零模型调用）
+
+目标：确认 D28 修订（默认六组）与 D33（透明前缀内推）在真实会话里的效果。
+
+```bash
+{
+  printf '%s
+' '{"id":"b1","type":"bash","command":"rg -n readOnlyProfiles src && echo done"}'; sleep 5
+  printf '%s
+' '{"id":"b2","type":"bash","command":"timeout 5 rg -n readOnlyProfiles src/config"}'; sleep 5
+  printf '%s
+' '{"id":"b3","type":"bash","command":"which node && date"}'; sleep 5
+  printf '%s
+' '{"id":"b4","type":"bash","command":"cat package.json | sort"}'; sleep 5
+} | pi --mode rpc --no-session -a -e <仓库路径>
+```
+
+| 命令 | 结果 |
+|---|---|
+| `rg -n readOnlyProfiles src && echo done` | `allow, source: policy`，两个单元都免评审（`print` 分组），命令真实执行 |
+| `timeout 5 rg -n readOnlyProfiles src/config` | `allow, source: policy`（透明前缀内推后按 `rg` 判定） |
+| `which node && date` | `allow, source: policy`（`system` 分组） |
+| `cat package.json \| sort` | `deny`（`sort` 在默认关闭的 `text-tools` 分组里 → `review` → 评审不可用 → fail-closed），**未执行** |
+
+最后一行是**预期边界**：未声明档案的命令仍然逐次评审（D29），把 `text-tools` 加进 `readOnly.profiles` 即可放行。
 
 ## 4. 待人工执行（需要真实模型 / 交互 UI / 真实子代理）
 

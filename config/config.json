@@ -66,7 +66,20 @@
   },
 
   "workingDirectory": {
-    "allowRoots": []
+    "allowRoots": [],
+    "readOnly": {
+      "profiles": [
+        "search",
+        "vcs-read",
+        "nav",
+        "text-read",
+        "print",
+        "system"
+      ],
+      "commands": [],
+      "unsafeOptions": [],
+      "sinks": []
+    }
   },
 
   "permission": {

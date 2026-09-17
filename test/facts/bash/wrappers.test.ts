@@ -5,6 +5,7 @@ import {
   OPAQUE_WRAPPERS,
   classifyWrapper,
   executableName,
+  transparentPrefixStart,
   unresolvedCauseForWrapper,
 } from "../../../src/facts/bash/wrappers.ts";
 
@@ -65,8 +66,64 @@ describe("classifyWrapper：包装器识别（FR-12）", () => {
     expect(classifyWrapper(undefined, ["sudo", "rm"])).toBeUndefined();
   });
 
+  it("`command -v` / `-V` 是查询而不是包装器（不执行参数）", () => {
+    expect(classifyWrapper("command", ["command", "-v", "rg"])).toBeUndefined();
+    expect(classifyWrapper("command", ["command", "-p", "-V", "rg"])).toBeUndefined();
+    // 不查询时仍然是包装器（可被透明前缀内推）。
+    expect(classifyWrapper("command", ["command", "cat", "f"])).toBe("indirection");
+  });
+
   it("降级原因与包装器类型一一对应", () => {
     expect(unresolvedCauseForWrapper("opaque")).toBe("opaque-wrapper");
     expect(unresolvedCauseForWrapper("indirection")).toBe("indirection-wrapper");
+  });
+});
+
+describe("transparentPrefixStart：透明前缀内推（FR-12 修订）", () => {
+  it("跳过自己的选项后，内层命令就是真正要执行的东西", () => {
+    expect(transparentPrefixStart("nice", ["-n", "5", "cat", "f"])).toBe(2);
+    expect(transparentPrefixStart("nice", ["cat", "f"])).toBe(0);
+    expect(transparentPrefixStart("nohup", ["cat", "f"])).toBe(0);
+    expect(transparentPrefixStart("time", ["-p", "cat", "f"])).toBe(1);
+    expect(transparentPrefixStart("stdbuf", ["-o0", "cat", "f"])).toBe(1);
+    expect(transparentPrefixStart("stdbuf", ["-o", "0", "cat", "f"])).toBe(2);
+  });
+
+  it("timeout 还要跳过一个时长", () => {
+    expect(transparentPrefixStart("timeout", ["5", "cat", "f"])).toBe(1);
+    expect(transparentPrefixStart("timeout", ["5s", "cat", "f"])).toBe(1);
+    expect(transparentPrefixStart("timeout", ["--foreground", "5", "cat", "f"])).toBe(2);
+    expect(transparentPrefixStart("timeout", ["-s", "KILL", "5", "cat", "f"])).toBe(3);
+    expect(transparentPrefixStart("timeout", ["--signal=KILL", "5", "cat", "f"])).toBe(2);
+    expect(transparentPrefixStart("timeout", ["-k", "1", "-s", "KILL", "5", "cat"])).toBe(5);
+  });
+
+  it("env 还要跳过 NAME=VALUE", () => {
+    expect(transparentPrefixStart("env", ["-u", "FOO", "cat", "f"])).toBe(2);
+    expect(transparentPrefixStart("env", ["FOO=1", "BAR=2", "cat", "f"])).toBe(2);
+    expect(transparentPrefixStart("env", ["cat"])).toBe(0);
+  });
+
+  it("command 只在不是查询时内推", () => {
+    expect(transparentPrefixStart("command", ["cat", "f"])).toBe(0);
+    expect(transparentPrefixStart("command", ["-p", "cat", "f"])).toBe(1);
+    expect(transparentPrefixStart("command", ["-v", "rg"])).toBeUndefined();
+    expect(transparentPrefixStart("command", ["-p", "-V", "rg"])).toBeUndefined();
+  });
+
+  it("看不透参数布局时返回 undefined（继续按不透明处理）", () => {
+    // 没有内层命令。
+    expect(transparentPrefixStart("timeout", ["5"])).toBeUndefined();
+    expect(transparentPrefixStart("env", [])).toBeUndefined();
+    expect(transparentPrefixStart("nice", ["-n"])).toBeUndefined();
+    // 不可静态确定的内层命令名由调用方拦（见 enumerate 的 resolveUnwrap）。
+    expect(transparentPrefixStart("timeout", ["5", "$CMD"])).toBe(1);
+  });
+
+  it("不在透明名单里的包装器一律不内推", () => {
+    for (const name of ["sudo", "xargs", "exec", "parallel", "setsid", "chroot", "builtin"]) {
+      expect(transparentPrefixStart(name, ["cat", "f"])).toBeUndefined();
+    }
+    expect(transparentPrefixStart(undefined, ["cat", "f"])).toBeUndefined();
   });
 });

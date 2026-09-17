@@ -299,16 +299,122 @@ echo ok && rm -rf /
 
 v1 只兼容 `@gotgenes/pi-subagents` v21.7.1。绑定握手与子会话 registry 都放在进程级存储里（父子扩展实例的事件总线是按会话的，不互通）。父会话在 `bound` 后未收到子扩展握手时：有 UI 使用 warning 通知（每个父会话只提示一次），无 UI 写入 `console.warn`，同时为每个受影响的子会话写入 `pi-permission-guardian.subagent-warning.v1` 会话条目，并把 `/perm status` 标为 `unguarded`。未识别（其他子代理实现或父实例未加载护栏）时显示“未识别，使用父策略”。
 
-## 7. 工作目录
+## 7. 工作目录与只读免评审
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `allowRoots` | `[]` | 视为"内部"的额外根目录 |
-| `readOnlyCommands` | 内置高置信集合；显式配置时完整覆盖 | 只读命令白名单 |
+| `readOnly.profiles` | `["search", "vcs-read", "nav", "text-read", "print", "system"]` | 启用的内置只读档案分组（FR-65 / D28） |
+| `readOnly.commands` | `[]` | 自定义只读档案（字符串或对象），排在分组之前 |
+| `readOnly.unsafeOptions` | `[]` | 用户级全局选项黑名单，对所有档案生效，跨层取并集 |
+| `readOnly.commands[].onlyWithinRoots` | `false` | 免评审要求目标在项目根内（用于 `cd` 这类导航命令） |
+| `readOnly.sinks` | `[]` | 额外的"写入不算副作用"的目标（FR-67），跨层取交集 |
+| `readOnlyCommands` | 内置高置信集合；显式配置时完整覆盖 | 旧的字符串白名单（仍然有效，语义不变） |
 
 `allowRoots` 用于 monorepo：把兄弟包路径加进来，避免项目间的正常读写被判定为外部目录访问。例如 `["../shared-lib", "~/dev/monorepo"]`。
 
-`readOnlyCommands` 命中即 `allow`，不产生评审调用（FR-9）。匹配方式是**命令单元的可执行名 + 参数前缀**：`"git status"` 匹配 `git status --short`，但不匹配 `git push`。
+### 7.1 免评审的两张名单
+
+免评审（命中即 `allow`，不产生评审调用）由**档案 + 选项名单**共同决定：
+
+- **档案**说明"这条命令本质只读"：`argv` 前缀（可执行名 + 参数）+ 每个位置参数的**角色**；
+- **选项名单**说明"这些选项会写文件 / 执行程序 / 改工作目录"：命中即取消免评审。
+
+只看前缀的旧做法有两个不可接受的后果：把 `rg` 关在白名单外，每次搜索都要一次模型评审；把 `rg` 放进去，`rg --pre <程序>` 就会直接放行（实测每个被搜文件 spawn 一次）。角色与选项名单让"默认免评审"和"不放行危险写法"同时成立。
+
+档案来源有三类，**顺序即优先级**（第一个命中的档案生效）：
+
+```text
+用户条目（readOnly.commands） → 内置分组（readOnly.profiles） → 旧字符串白名单（readOnlyCommands）
+```
+
+因此想收紧某条内置档案，只要写一条更具体的同名 `argv` 条目即可（例如把 `rg` 的 `unsafeOptions` 写得更长）。
+
+### 7.2 位置参数角色
+
+| 角色 | 含义 | 例子 |
+|---|---|---|
+| `paths` | 文件/目录路径：产出 **read** 方向的路径目标；取值不可静态确定时整条命令降级为不可信 | `cat f.txt`、`rg -n x src/` 的 `src/` |
+| `pattern` | 模式/正则/命令名，**不是文件**：不产出路径目标，取值动态也不影响免评审 | `rg -n "\.env" src/` 的 `"\.env"`、`which node` 的 `node` |
+| `script` | 一段**脚本代码**：必须**整体命中** `script` 里的正则集，否则取消免评审 | `sed -n '1,10p' f` 的 `'1,10p'` |
+
+角色缺省是 `["paths"]`（等价于旧字符串条目的行为）；序列最后一项吸收剩余位置参数；角色写 `[]` 表示**不允许位置参数**（`git branch <新分支名>` 会造分支，所以 `git branch` 档案就是这样写的）。
+
+### 7.3 选项名单
+
+| 策略 | 含义 | 适用 |
+|---|---|---|
+| `deny-list`（默认） | 未列出的选项默认安全；命中 `unsafeOptions` 即取消 | 选项集合稳定的命令（`rg`、`grep`、`sort`、`cat`） |
+| `allow-list` | **只有** `safeOptions` 列出的选项安全，其余一律取消 | 危险选项密集的命令（`find` 的 `-delete`/`-fprint`/`-exec`、`git branch` 的 `-d`/`-D`/`-m`/`-f`） |
+
+- `unsafeOptions` / `safeOptions` 按**词前缀**匹配：`--pre` 同时覆盖 `--pre=x` 与 `--pre-glob`（宁可多取消）。
+- 未声明安全的带值选项仍受旧形状规则约束：`--output=.env`（值像路径）会取消免评审。
+- `unsafeOptions` 的依据只有两类：**写文件**（`--output`、`sort -o`）与**执行程序**（`rg --pre`、`sort --compress-program`、`git --ext-diff`、`git grep -O`、`git -c`）。后者破坏面更大，也最容易漏。
+- 未声明档案的命令**不看**这些名单，行为与旧实现一致（D29）。
+
+### 7.4 内置分组
+
+| 分组 | 默认 | 内容与要点 |
+|---|---|---|
+| `search` | 开 | `rg`（`unsafeOptions: --pre / --hostname-bin`，`safeOptions: -g / --glob / --type`）、`grep`、`find`（allow-list） |
+| `nav` | 开 | `cd` / `pushd`，都带 `onlyWithinRoots`：**目标必须落在项目根内**免评审（`cd src` ✓、`cd ..` / `cd /tmp` / `cd ~` 不免）。要求至少一个位置参数且全部目标非 external，因此无参数 `cd`（回家目录）、`cd -`、`popd`（目标是栈顶）都不免 |
+| `text-read` | 开 | `cat` `head` `tail` `wc` `nl` `od` `xxd` `file` `stat` `ls` `realpath` `tree`（`tree -o` 取消免评审） |
+| `print` | 开 | `echo` / `printf`，角色是 `pattern`：位置参数是**文本而不是文件**，因此不会产出读路径（`echo note.env` 不会撞 `*.env` 规则），写文件仍由重定向层面判定 |
+| `system` | 开 | `date`（`-s`/`--set` 取消）、`du` `df` `lsof`、`which` `type`、`command -v` / `command -V`（查询，不执行参数）、`ps` `uname` `id` `whoami` `uptime` `nproc`、`hostname`（不允许位置参数） |
+| `vcs-read` | 开 | `git status/diff/log/show/ls-files/ls-tree/rev-parse/blame/shortlog/describe/cat-file/for-each-ref/grep`（`unsafeOptions: --output / --ext-diff`，`git grep` 另加 `-O / --ext-grep`）、`git branch`（allow-list：只放行 `--show-current`、`-a`、`-v`、`--list` 等查询形式，且不允许位置参数）、`git remote -v`、`git worktree list`、`git stash list` |
+| `text-tools` | **关** | `sort`（`-o`/`--output`/`--compress-program`/`-T` 取消）、`uniq` `cut` `comm` `cmp` `diff`、`tr`、`jq` |
+| `meta` | **关** | 版本查询：`node --version`、`npm --version`、`python --version`、`tsc --version`、`git --version`、`rg --version` 等（前缀限定到具体旗标，因此裸 `node` **永远**不免评审） |
+
+**明确不进内置分组**：`sed` / `awk` / `perl` / 裸 `node` / 裸 `python`（脚本体或程序体可写可执行）、`tee` / `unzip` / `tar`（写）、网络类命令（`curl` / `wget` / `gh` / `dig`）。判定方式是 argv，不是沙箱；别名、PATH 劫持、以及 `RIPGREP_CONFIG_PATH` 这类工具配置注入的执行点都在它的视野之外。
+
+**透明前缀内推**（FR-12 修订 / D33）：`timeout` / `nice` / `ionice` / `stdbuf` / `nohup` / `time` / `env` / `command` 会被跳过，按**后面的命令**判定，最多 3 层：
+
+| 调用 | 结果 |
+|---|---|
+| `timeout 5 cat f.txt`、`nice -n 5 cat f.txt`、`env FOO=1 rg -n x src`、`command cat f.txt` | 与内层命令同样免评审 |
+| `timeout 30 rm -rf ./dist` | 外层文本与内层文本都参与规则匹配（`rm -rf ./dist*` 照样命中） |
+| `sudo rm -rf /tmp/x`、`xargs rm`、`bash -c 'cat f'`、`timeout 5 $CMD f` | 仍是不透明包装器 → `onUnresolvedFacts`（默认 `review`） |
+| `command -v rg` / `command -V rg` | 是**查询**而不是执行，由 `system` 分组的 `command -v` 档案免评审 |
+
+跳过参数靠的是各命令文档化的语法（`timeout` 的 DURATION、`env` 的 `NAME=VALUE`、`-s KILL` 这类取值选项）；布局看不透时不内推，落到不透明分支。
+
+### 7.5 自定义档案示例
+
+只放行 `sed -n 'N,Mp' <file>` 这种形态（`sed` 默认不在内置分组里：`sed 'e …'` / `'s/x/y/e'` / `'1w out.txt'` / `-i` 实测都能执行命令或写文件）：
+
+```json
+{
+  "workingDirectory": {
+    "readOnly": {
+      "commands": [
+        {
+          "argv": ["sed"],
+          "roles": ["script", "paths"],
+          "script": ["^[0-9]+(,[0-9]+)?p$", "^[0-9]+(,[0-9]+)?d$"],
+          "optionPolicy": "allow-list",
+          "safeOptions": ["-n", "--quiet", "--silent", "--posix"],
+          "unsafeOptions": ["-i", "--in-place", "-e", "--expression", "-f", "--file"],
+          "reason": "只放行 sed -n 'N,Mp' <file>"
+        }
+      ]
+    }
+  }
+}
+```
+
+`script` 模式集是**白名单式**的（整体锚定，不匹配即取消），所以模式写松就等于失去保护；`-e` / `-f` 这类“换个地方给脚本”的选项必须同时进 `unsafeOptions`。配置层会拦住非法正则、以及“声明了 `script` 角色却没给模式集”这类写错。
+
+### 7.6 空设备 sink（FR-67）
+
+写 `/dev/null`（win32 还有 `NUL`）不产生路径目标、不算写副作用，因此 `ls 2>/dev/null`、`cat f > /dev/null` 免评审。要点：
+
+- `/dev/null` 在 POSIX 与 win32 都是空设备（Windows 上的 pi 用 git-bash）；`NUL` **只有 win32** 是——POSIX 上的 `> NUL` 会真的在当前目录建一个叫 `NUL` 的文件，因此仍算写副作用。
+- 项目里叫 `src/dev/null` 的文件**不是** sink。
+- `readOnly.sinks` 只能**追加**额外目标（例如容器里的 `/dev/fd/3`），跨层取交集：追加 sink 等于放宽，下层不能单方面扩大。
+
+### 7.7 旧字符串白名单 `readOnlyCommands`
+
+`readOnlyCommands` 命中即 `allow`（FR-9），匹配方式是**命令单元的可执行名 + 参数前缀**：`"git status"` 匹配 `git status --short`，但不匹配 `git push`。它等价于一条 `roles: ["paths"]` 的档案，因此表达能力有限（说不出“这个参数是模式”，也没有选项名单）。
 
 内置默认集为：
 
@@ -316,18 +422,41 @@ v1 只兼容 `@gotgenes/pi-subagents` v21.7.1。绑定握手与子会话 registr
 pwd, ls, cat, head, tail, wc, git status, git diff, git log, git show
 ```
 
-内置集保持最小和通用，匹配严格使用“可执行名 + 参数前缀”，不为某个选项额外增加分支。省略 `readOnlyCommands` 时使用内置集；一旦显式配置数组，该数组**完整覆盖**内置集，而不是增量追加。`"readOnlyCommands": []` 可关闭默认白名单。`file`、`stat`、`which`、`whoami`、`date`、`echo`、`rg`、`grep`、`find`、`git branch` 及版本查询等命令不进入内置集，用户可以按项目需要显式加入。
+省略该字段时使用内置集；一旦显式配置数组，该数组**完整覆盖**内置集（不是增量追加），`"readOnlyCommands": []` 可关闭它。它在优先级上排在 `readOnly` 之后，因此默认配置下 `git status` 这类调用实际命中分组里的档案（带 `unsafeOptions`，`git diff --output out.txt` 因此被封住）。
 
-两条护栏限制白名单的免评审范围，配自定义条目时需要知道：
+### 7.8 cd 跟踪与相对路径（FR-70）
 
-- **带路径值的选项会取消免评审资格**：参数里出现 `--output=.env` 这种"带 `=` 且值像路径"的选项时，该次调用不算只读。这是通用形状规则（不为具体选项开分支）。
-- **残余面**：`git diff --output out.txt`（空格写法）和 `--output=out.txt`（值不像路径）看不出写文件意图，仍会被当作只读免评审。`git diff` / `git log` / `git show` 确实接受会写文件的 `--output=<file>`（实测两种写法都会真实写），保留它们是"对工作目录的只读操作应当免评审"的选择。要封死这个面，在 `permission.bash` 里加一条即可（`*` 跨空格，两种写法都能盖住）：
+字面 `cd <路径>` / `pushd <路径>` 之后的相对路径按**新目录**解析（`cd src && cat .env` 读的是 `src/.env`）。要点：
 
-  ```json
-  { "permission": { "bash": { "git diff --output*": "review" } } }
-  ```
+- **进项目内目录免评审**（`nav` 分组，默认开启）：`cd src && rg -n x` 整条命令 `allow`。`cd ..` / `cd /tmp` / `cd ~` / 无参数 `cd` / `cd -` / `popd` 不免评审，原因写进 `readOnlyCancel`（`outside-roots` / `no-path-target`）。
 
-- **解析没读懂的命令不算只读**：解析失败、opaque 包装器（`bash -c`、`eval`）、参数里带无法静态展开的取值时，单元一律不判只读，转而走 `onUnresolvedFacts`（默认 `review`）。
+- 管道元素、子 shell、命令替换各自独立：`(cd /tmp && cat x)` 读 `/tmp/x`，而 `cd /tmp | cat x` 的 `cat x` 仍按会话 cwd。
+- `cd -` / `cd $DIR` / `popd` 之后，该作用域内后续单元的相对路径不可静态确定，一律走 `onUnresolvedFacts`（默认 `review`），而不是拿旧 cwd 猜一个看起来真实的路径。
+- “哪些目录算内部”不受影响：`cd /tmp` 不会把 `/tmp` 变成内部目录（`external_directory_*` 仍按会话根目录判定）。
+
+### 7.9 受免评审影响的三条护栏
+
+- **解析没读懂的命令不算只读**：解析失败、opaque 包装器（`bash -c`、`eval`）、路径位置带无法静态展开的取值 → 走 `onUnresolvedFacts`（默认 `review`）。
+- **用户规则优先**：显式 `permission.bash` 规则在免评审之前求值，因此 `"rg *": "deny"` 照样拦得住 `rg`；免评审只会把 `ask` / `review` 落点放宽为 `allow`，`deny` 永不被覆盖。
+- **路径对象独立投票**：免评审只作用于命令对象，`rg x .env` 仍会被 `path` 里的 `*.env: deny` 拦住；只有**搜索模式**这类被声明为 `pattern` 的参数不会被误判成路径。
+
+### 7.10 为什么又会去评审：`readOnlyCancel`
+
+命中档案但免评审被取消时，审计条目会带 `readOnlyCancel`，判定理由与 `/perm status` 也能看到，取值形如：
+
+| 值 | 含义 |
+|---|---|
+| `unsafe-option:--pre` | 命中 `unsafeOptions` |
+| `option-not-allowed:-D` | `allow-list` 下未列出的选项（或带值选项的取值不可静态确定） |
+| `option-path-value:--output` | 未声明安全的 `--opt=<值像路径>` |
+| `script-not-allowed` | `script` 角色未命中模式集（含脚本缺失） |
+| `dynamic-arg` | 选项名或脚本本身不可静态确定 |
+| `unexpected-arg:newbranch` | 档案声明了角色却出现了没被任何角色吸收的位置参数 |
+| `redirect-write:/proj/app/out.txt` | 写了真实文件（不是空设备） |
+| `outside-roots` | 档案要求目标在项目根内，但目标在外部（`cd /tmp`、`cd ..`） |
+| `no-path-target` | 档案要求目标在项目根内，但命令没有位置参数（无参数 `cd` = 回家目录、无参数 `pushd` = 栈顶交换） |
+
+没有命中档案时**不会**记取消原因：那不是“被取消”，而是本来就不在白名单里。
 
 ## 8. 规则表 `permission`
 

@@ -20,6 +20,11 @@ echo hi > out.txt
 cat < in.txt >> out.txt 2>&1
 cat <> both.txt
 rm x 2> /dev/null || true
+ls 2>/dev/null
+cat file.txt >/dev/null
+cat file.txt 2> NUL
+ls > out.txt
+cd src && cat file.txt
 sudo rm -rf /
 doas rm -rf /
 xargs rm < list.txt
@@ -100,6 +105,8 @@ stdbuf -o0 rm x
 sudo -u root rm x
 env FOO=1 rm x
 exec rm x
+cd -
+pushd
 pushd /tmp
 popd
 # 变量展开：`~user` 无法得知家目录

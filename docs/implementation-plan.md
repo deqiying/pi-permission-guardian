@@ -28,6 +28,7 @@ M0 工程骨架
   -> M5 降本机制与人工交互
   -> M6 子代理覆盖
   -> M7 分发、文档与端到端验收
+  -> M8 只读档案与免评审优化
 ```
 
 依赖关系如下：
@@ -41,6 +42,7 @@ M0 工程骨架
 | M5 | M4 | 缓存、熔断和预评分不能绕过评审失败语义 |
 | M6 | M3 | 子代理先切换保守策略，再复用完整决策管线 |
 | M7 | M1 至 M6 | 分发验收必须覆盖完整链路 |
+| M8 | M2 | 只读判定只依赖事实层与配置展开，不改动规则求值、评审与授权链路 |
 
 ## 3. M0 工程骨架
 
@@ -385,7 +387,59 @@ schema generation script
 - 参考配置可直接加载，非法配置 fail-closed。
 - 所有负向测试通过，尤其是 deny 绕过、评审不可用、异常路径和子代理缺口。
 
-## 11. 测试分层与命令
+## 11. M8 只读档案与免评审优化
+
+### 目标
+
+把“只读免评审”从单一维度（argv 前缀）升级为**档案 + 选项名单**（FR-65~FR-70），让高频只读命令（`rg` / `grep` / `find` / git 只读子命令）默认免评审，同时不放行“选项即程序”的写法。依据与实测证据见 `docs/proposals/read-only-profiles.md`。
+
+### 主要文件
+
+```text
+src/facts/bash/argv.ts              结构化 argv（选项 / 位置参数 / --opt=value 取值 / 动态标记）
+src/facts/bash/readonly-commands.ts 档案匹配、角色、选项名单、免评审判定
+src/facts/bash/path-tokens.ts       按角色归因路径（未声明档案的命令保持旧口径）
+src/facts/bash/redirects.ts         空设备 sink（FR-67）
+src/facts/bash/enumerate.ts         cd 工作目录作用域（FR-70）+ 取消原因（FR-69）
+src/config/readonly.ts              内置分组数据与展开（顺序即优先级）
+src/config/schema.ts                workingDirectory.readOnly（唯一真源，跑 npm run gen:schema）
+docs/configuration.md §7            档案、角色、选项名单、sink、取消原因
+test/facts/bash/readonly-profiles.test.ts 端到端行为表（承诺的行为）
+```
+
+### 工作项
+
+1. `argv.ts` 把语法树节点摊成 token：选项 / 位置参数（带序号）/ `--opt=value` 的取值 / 每个 token 的动态标记，并处理 `--` 之后全为位置参数。
+2. `readonly-commands.ts` 实现三类名单：档案前缀（第一个命中生效）、位置参数角色（`paths` / `pattern` / `script`）、选项名单（`deny-list` + `unsafeOptions`，或 `allow-list` + `safeOptions`）；任何看不懂的形态只取消免评审或升级为不可信。
+3. `path-tokens.ts` 改成“命中档案按角色归因，未命中档案走旧口径”，并保证旧字符串白名单条目等价于 `roles: ["paths"]`。
+4. `redirects.ts` 按平台识别空设备 sink（`/dev/null` 两种平台、`NUL` 仅 win32），支持 `readOnly.sinks` 追加。
+5. `enumerate.ts` 按 bash 作用域跟踪 `cd` / `pushd` / `popd`；管道元素、子 shell、命令替换派生独立作用域；作用域不可确定时后续单元降级 `dynamic-path`。
+6. 配置面：`workingDirectory.readOnly`（`profiles` / `commands` / `unsafeOptions` / `sinks`），跨层 `unsafeOptions` 取并集、`sinks` 取交集；`npm run gen:schema` 重新生成 schema，`config/config.json` 与 `config.example.jsonc` 同步。
+9. 默认分组含 `nav`（`cd` / `pushd` + `onlyWithinRoots`）：进项目内目录免评审，出项目外 / `cd -` / 无参数 / `popd` 不免；`cd -`、无参数 `pushd`、`popd` 的目标不可静态确定，单元升级为 `dynamic-path`。
+10. 默认分组放宽到六组（`search` / `vcs-read` / `nav` / `text-read` / `print` / `system`，D28 修订）：常见组合命令（`rg … && echo done`、`which node && date`）整体免评审；`text-tools` / `meta` 仍默认关闭。
+11. 透明前缀内推（FR-12 修订 / D33）：`timeout` / `nice` / `ionice` / `stdbuf` / `nohup` / `time` / `env` / `command` 在参数分析之前被跳过（最多 3 层），内层命令文本作为规则额外目标；`sudo` / `xargs` / `bash -c` / 动态内层命令仍不透明。
+7. 可观测：`CommandUnit.readOnlyCancel` → `PolicyObject` → 审计条目 / 判定理由 / `/perm status`。
+8. 文档与需求同步：`docs/requirements.md`（FR-65~FR-70、D21 修订、D28~D32、§8.2 残余面）、`docs/architecture.md`（§5.2/§5.3/§5.4）、`docs/configuration.md` §7、README。
+
+### 验证门禁
+
+- `npm run typecheck`
+- `npm test`（含语料与 `test/facts/bash/readonly-profiles.test.ts` 的逐条行为表）
+- `npm run gen:schema`（提交生成物，漂移由 `test/config/schema.test.ts` 捕获）
+- `npm run validate:config`
+- `npm run check:pack`
+
+### 负向用例（缺一不可）
+
+`find . -delete`、`sort -o out.txt`、`rg --pre …`、`git branch -D feature`、`git branch <新分支名>`、`git log --output out.txt`、`git -c core.fsmonitor=<cmd> status`、`sed -i`（自定义档案下）、`node -e`、`cat "$FILE"`、`cd $DIR && cat x`。透明前缀相关：`sudo rm -rf /tmp/x`、`xargs rm`、`bash -c 'rm x'`、`timeout 5 $CMD cat f`（都必须仍带 `unresolved`），以及 `timeout 30 rm -rf ./dist` 必须被 `rm -rf ./dist*` 规则拦住。
+
+### 最终验收
+
+- `rg -n "…" src/`、`grep -rn …`、`find . -name '*.ts'`、`git status`、`git log`、`ls 2>/dev/null` 不再产生评审调用。
+- 上表负向用例全部取消免评审，并能在审计里读到取消原因。
+- 用户显式规则、`deny`、路径对象独立投票、解析失败降级四条不变量保持不变。
+
+## 12. 测试分层与命令
 
 | 层 | 主要方式 | 对应里程碑 |
 |---|---|---|
@@ -422,7 +476,7 @@ npm run check:pack
 
 命令名以 M0 实际 package scripts 为准；若调整，必须同步 CI 和本计划。
 
-## 12. 代码审查重点
+## 13. 代码审查重点
 
 每个里程碑评审时优先检查以下不变量：
 
@@ -436,7 +490,7 @@ npm run check:pack
 - 是否在父会话和子会话之间共享 grants、cache 或 breaker。
 - 是否把不可观测的共存边界描述成已保证行为。
 
-## 13. 完成定义
+## 14. 完成定义
 
 满足以下条件后，v1 才视为实施完成：
 

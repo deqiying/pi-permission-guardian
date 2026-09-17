@@ -224,8 +224,57 @@
         "true"
       ],
       "paths": [
-        "write:x",
-        "write:/dev/null"
+        "write:x"
+      ]
+    },
+    "ls 2>/dev/null": {
+      "units": [
+        "ls"
+      ],
+      "readOnly": [
+        0
+      ],
+      "paths": []
+    },
+    "cat file.txt >/dev/null": {
+      "units": [
+        "cat file.txt"
+      ],
+      "readOnly": [
+        0
+      ],
+      "paths": [
+        "read:file.txt"
+      ]
+    },
+    "cat file.txt 2> NUL": {
+      "units": [
+        "cat file.txt"
+      ],
+      "paths": [
+        "read:file.txt",
+        "write:NUL"
+      ]
+    },
+    "ls > out.txt": {
+      "units": [
+        "ls"
+      ],
+      "paths": [
+        "write:out.txt"
+      ]
+    },
+    "cd src && cat file.txt": {
+      "units": [
+        "cd src",
+        "cat file.txt"
+      ],
+      "readOnly": [
+        1
+      ],
+      "paths": [
+        "read:src",
+        "read:file.txt"
       ]
     },
     "sudo rm -rf /": {
@@ -325,12 +374,8 @@
       "units": [
         "command rm -rf /tmp/x"
       ],
-      "unresolved": "indirection-wrapper",
-      "unresolvedUnits": [
-        0
-      ],
-      "wrappers": {
-        "0": "indirection"
+      "unwrapped": {
+        "0": "rm -rf /tmp/x"
       },
       "paths": [
         "write:/tmp/x"
@@ -355,12 +400,8 @@
       "units": [
         "timeout 5 rm -rf /tmp/x"
       ],
-      "unresolved": "indirection-wrapper",
-      "unresolvedUnits": [
-        0
-      ],
-      "wrappers": {
-        "0": "indirection"
+      "unwrapped": {
+        "0": "rm -rf /tmp/x"
       },
       "paths": [
         "write:/tmp/x"
@@ -370,12 +411,8 @@
       "units": [
         "nohup rm -rf /tmp/x"
       ],
-      "unresolved": "indirection-wrapper",
-      "unresolvedUnits": [
-        0
-      ],
-      "wrappers": {
-        "0": "indirection"
+      "unwrapped": {
+        "0": "rm -rf /tmp/x"
       },
       "paths": [
         "write:/tmp/x"
@@ -385,12 +422,8 @@
       "units": [
         "nice -n 5 rm -rf /tmp/x"
       ],
-      "unresolved": "indirection-wrapper",
-      "unresolvedUnits": [
-        0
-      ],
-      "wrappers": {
-        "0": "indirection"
+      "unwrapped": {
+        "0": "rm -rf /tmp/x"
       },
       "paths": [
         "write:/tmp/x"
@@ -885,12 +918,8 @@
       "units": [
         "command rm -rf /"
       ],
-      "unresolved": "indirection-wrapper",
-      "unresolvedUnits": [
-        0
-      ],
-      "wrappers": {
-        "0": "indirection"
+      "unwrapped": {
+        "0": "rm -rf /"
       },
       "paths": [
         "write:/"
@@ -912,13 +941,12 @@
       "units": [
         "stdbuf -o0 rm x"
       ],
-      "unresolved": "indirection-wrapper",
-      "unresolvedUnits": [
-        0
-      ],
-      "wrappers": {
-        "0": "indirection"
-      }
+      "unwrapped": {
+        "0": "rm x"
+      },
+      "paths": [
+        "write:x"
+      ]
     },
     "sudo -u root rm x": {
       "units": [
@@ -936,13 +964,12 @@
       "units": [
         "env FOO=1 rm x"
       ],
-      "unresolved": "indirection-wrapper",
-      "unresolvedUnits": [
-        0
-      ],
-      "wrappers": {
-        "0": "indirection"
-      }
+      "unwrapped": {
+        "0": "rm x"
+      },
+      "paths": [
+        "write:x"
+      ]
     },
     "exec rm x": {
       "units": [
@@ -956,6 +983,28 @@
         "0": "indirection"
       }
     },
+    "cd -": {
+      "units": [
+        "cd -"
+      ],
+      "unresolved": "dynamic-path",
+      "unresolvedUnits": [
+        0
+      ],
+      "paths": [
+        "read:-"
+      ]
+    },
+    "pushd": {
+      "units": [
+        "pushd"
+      ],
+      "unresolved": "dynamic-path",
+      "unresolvedUnits": [
+        0
+      ],
+      "paths": []
+    },
     "pushd /tmp": {
       "units": [
         "pushd /tmp"
@@ -967,7 +1016,12 @@
     "popd": {
       "units": [
         "popd"
-      ]
+      ],
+      "unresolved": "dynamic-path",
+      "unresolvedUnits": [
+        0
+      ],
+      "paths": []
     },
     "cat ~user/x": {
       "units": [

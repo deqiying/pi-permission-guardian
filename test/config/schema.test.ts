@@ -144,9 +144,9 @@ describe("配置 schema（FR-57/58）", () => {
       "tail",
       "wc",
       "git status",
-      // 用户决策：对工作目录的只读操作应当免评审，即使这些命令存在会写文件的选项
-      // （`git diff --output=<file>`）；形状规则会取消 `--output=<值像路径>` 的免评审资格，
-      // 空格写法/值不像路径的写法是已知残余面，由用户按需加 `"git diff --output*": "review"`。
+      // 用户决策：对工作目录的只读操作应当免评审。
+      // 这些字符串条目本身仍有残余面（`git diff --output out.txt` 的空格写法）；
+      // 生产路径上命中它们之前会先命中结构化档案（FR-66 的 unsafeOptions 已封死 --output）。
       "git diff",
       "git log",
       "git show",
@@ -199,6 +199,89 @@ describe("配置 schema（FR-57/58）", () => {
     });
 
     expect(config.workingDirectory.readOnlyCommands).toEqual([]);
+  });
+
+  it("只读档案的缺省值：最小分组开启，其余关闭（FR-65/D28）", () => {
+    const readOnly = guardianConfigSchema.parse({}).workingDirectory.readOnly;
+
+    expect(readOnly.profiles).toEqual([
+      "search",
+      "vcs-read",
+      "nav",
+      "text-read",
+      "print",
+      "system",
+    ]);
+    expect(readOnly.commands).toEqual([]);
+    expect(readOnly.unsafeOptions).toEqual([]);
+    expect(readOnly.sinks).toEqual([]);
+  });
+
+  it("只读档案：分组名受约束，条目字段严格", () => {
+    const validator = guardianConfigSchema;
+
+    expect(
+      validator.safeParse({ workingDirectory: { readOnly: { profiles: ["search"] } } })
+        .success,
+    ).toBe(true);
+    expect(
+      validator.safeParse({ workingDirectory: { readOnly: { profiles: ["nav"] } } }).success,
+    ).toBe(true);
+    expect(
+      validator.safeParse({ workingDirectory: { readOnly: { profiles: [] } } }).success,
+    ).toBe(true);
+    expect(
+      validator.safeParse({ workingDirectory: { readOnly: { profiles: ["everything"] } } })
+        .success,
+    ).toBe(false);
+    // 字符串条目与对象条目两种写法都要接受。
+    expect(
+      validator.safeParse({ workingDirectory: { readOnly: { commands: ["sed *"] } } })
+        .success,
+    ).toBe(true);
+    expect(
+      validator.safeParse({
+        workingDirectory: {
+          readOnly: {
+            commands: [{ argv: ["rg"], roles: ["pattern", "paths"], unsafeOptions: ["--pre"] }],
+          },
+        },
+      }).success,
+    ).toBe(true);
+    // 未知字段、空 argv、非法角色都要被拦住。
+    for (const command of [
+      { argv: [] },
+      { argv: ["rg"], roles: ["paths", "pattern", "script", "regex"] },
+      { argv: ["rg"], unknown: true },
+      { argv: ["cd"], onlyWithinRoots: "yes" },
+    ]) {
+      expect(
+        validator.safeParse({ workingDirectory: { readOnly: { commands: [command] } } })
+          .success,
+      ).toBe(false);
+    }
+  });
+
+  it("只读档案：script 模式必须是合法正则，且声明 script 角色时必须给模式（FR-65）", () => {
+    const validator = guardianConfigSchema;
+    const withScript = (entry: Record<string, unknown>) => ({
+      workingDirectory: { readOnly: { commands: [{ argv: ["sed"], ...entry }] } },
+    });
+
+    expect(
+      validator.safeParse(
+        withScript({ roles: ["script", "paths"], script: ["^[0-9]+p$"] }),
+      ).success,
+    ).toBe(true);
+    // 非法正则：编译不了的模式在事实层会静默“永不匹配”，因此必须在配置层拦住。
+    expect(
+      validator.safeParse(withScript({ roles: ["script"], script: ["^[0-9"] })).success,
+    ).toBe(false);
+    // 声明了 script 角色却没有模式集：该档案永远不会通过，说明写错了。
+    expect(validator.safeParse(withScript({ roles: ["script"] })).success).toBe(false);
+    expect(
+      validator.safeParse(withScript({ roles: ["script"], script: [] })).success,
+    ).toBe(false);
   });
 
   it("动作严格度序为 deny > ask > review > allow（FR-6）", () => {

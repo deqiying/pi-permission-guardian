@@ -435,6 +435,8 @@ parser.setLanguage(await Language.load(bashWasm));
 | 子 shell `( … )` | 同上 | FR-11 |
 | 前导赋值 `VAR=x cmd` | 剥离赋值前缀后匹配命令 | 否则 `FOO=1 rm -rf /` 会绕过 `rm *` |
 | 重定向 `>`/`>>`/`<` | 产出写/读 PathTarget | FR-13 |
+| 重定向目标是空设备（`2>/dev/null`、win32 的 `> NUL`） | **不产出** PathTarget：写空设备没有持久副作用，而把它算成写副作用会让 `ls 2>/dev/null` 这类最常见的抑制噪声写法一律降级为评审 | FR-67（只对空设备生效；`src/dev/null` 不是 sink） |
+| 工作目录（`cd` / `pushd` / `popd`） | 字面目标推进当前**作用域**的 cwd，供后续单元的相对路径解析；管道元素、子 shell、命令替换各自派生新作用域；`cd -` / `cd $DIR` / `popd` 把作用域标为不可确定，后续单元降级 `dynamic-path`。“哪些目录算内部”仍按会话根目录判定 | FR-70（bash 里管道元素与子 shell 都是子进程，cwd 不外泄） |
 | heredoc 之后的重定向（`cat <<EOF > out`） | 必须**递归**收集：该重定向是 `heredoc_redirect` 的子节点，只看直接子节点会漏掉它，让 `cat` 保持只读而免评审放行 | FR-13 |
 | 只有重定向、没有命令（`> .env`） | 产出 write 目标（bash 真的会截断文件）；`2>&1` 这类无可报告内容则不产出单元 | FR-13 |
 | 重定向目标是进程替换（`> >(cat)`） | 目标保持字面并降级；该重定向不向替换内部的命令继承 | FR-13/15 |
@@ -454,6 +456,18 @@ parser.setLanguage(await Language.load(bashWasm));
 - `opaque`（值是一段我们看不到的代码）：`bash` `sh` `zsh` `dash` `ksh` `ash` `fish` `csh` `tcsh` `eval` `source` `.`
 - `indirection`（参数由外层程序决定如何执行）：`sudo` `doas` `su` `runuser` `pkexec` `env` `xargs` `nohup` `timeout` `time` `nice` `ionice` `stdbuf` `setsid` `chroot` `command` `builtin` `exec` `parallel`，以及带 `-exec` / `-execdir` / `-ok` / `-okdir` 的 `find`
 
+**透明前缀内推（FR-12 修订，D33）**：`indirection` 里的一部参数布局固定、不改变后面的命令，因此在参数分析**之前**先内推：
+
+| 前缀 | 跳过什么 |
+|---|---|
+| `timeout` | 自己的选项（`-s` / `-k` / `--signal` / `--kill-after` 含取值）再一个 DURATION |
+| `nice` / `ionice` / `stdbuf` / `time` | 自己的选项（含取值）；`nice` 的 `-n N`、`stdbuf -o0`（取值粘在同一词里）都能识别 |
+| `nohup` | 自己的选项 |
+| `env` | 自己的选项与 `NAME=VALUE` 赋值 |
+| `command` | 自己的选项；但 `-v` / `-V` 是**查询**不是执行，不内推 |
+
+内推后，后面的命令就是本单元的“可执行名 + 参数”，因此只读档案、路径角色、写类命令归因都对它生效。三条边界：最多内推 3 层；内层命令名不可静态确定（`timeout 5 $CMD`）就不内推；内推后若内层仍是包装器（`env X=1 sudo rm y` 停在 `sudo`），它照常被标为不透明。内层命令文本会作为**额外的规则目标**（`timeout 30 rm -rf ./dist` 能被 `rm -rf ./dist*` 命中），外层文本仍然参与匹配（`timeout *` 也命中）。误判方向恒定：内层命令名对不上任何档案时只是一次评审，不会放行。
+
 ### 5.3 路径候选与方向归因
 
 `read` / `write` / `edit` 的路径来自工具输入字段；`bash` 的路径来自命令参数与重定向。
@@ -461,12 +475,13 @@ parser.setLanguage(await Language.load(bashWasm));
 
 | 条件 | 是否路径候选 | 方向 |
 |---|---|---|
-| 命令命中外置只读白名单（FR-9） | 全部非选项参数，但白名单条目自身消耗的词除外 | read |
+| 命令命中只读档案（FR-65） | 只有 `roles` 声明为 `paths` 的位置参数；档案前缀自身消耗的词除外；`pattern` / `script` 不产出目标 | read |
+| 命令命中旧字符串白名单（FR-9） | 全部非选项参数（等价于 `roles: ["paths"]` 的档案） | read |
 | `cd` / `pushd` / `popd` | 全部非选项参数 | read |
 | 命令属于内置写类文件命令（`rm` `mv` `cp` `tee` `mkdir` `chmod` …） | 全部非选项参数 | write |
 | 参数看起来像路径（含 `/` 或 `\`、以 `~` / `.` 开头、带盘符） | 是 | 命令非只读时 write |
 | 参数是变量/替换且同时像路径（`"$DIR"/x`） | 是，并标记单元 `dynamic-path` | 同上 |
-| 参数是带路径值的选项（`--output=.env`、`--output='~/x'`） | 是，且**取消该单元的免评审资格**（见下） | 同命令 |
+| 参数是带路径值且**未声明安全**的选项（`--output=.env`） | 是，且取消该单元的免评审资格（见下） | 同命令 |
 | URL（`https://…`） | 否 | — |
 | 其余（选项、普通词、不带分隔符的变量） | 否 | — |
 
@@ -474,12 +489,13 @@ parser.setLanguage(await Language.load(bashWasm));
 
 - **为什么给白名单与写类命令的全部参数**：漏掉它们会直接放过 `cat secrets.pem` 这类敏感文件读取。
 - **为什么不给所有命令的全部参数**：`echo note.env` 会因为命中 `*.env` 而被误拦；未知命令只看"看起来像路径"的词。
-- **带路径值的选项取消免评审资格**：参数里出现带 `=` 且值像路径的选项时，该单元即使命中也**不算只读**（多取消一次免评审，好过少取消一次）。规则只看**形状**，不为具体选项开分支（D21）。
-- **但形状规则替代不了人工核实**：`git diff --output <file>` 的空格写法、以及值为 `out.txt` 这种不像路径的写法，都看不出写文件意图。这是**已知残余面**：内置集里的 `git diff` / `git log` / `git show` 确实接受会写文件的 `--output=<file>`，把它们留在集合里是用户决策（对工作目录的只读操作应当免评审）。需要封死的用户在 `permission.bash` 里加一条 `"git diff --output*": "review"` 即可（`*` 跨空格，等号与空格两种写法都能盖住）。
+- **带路径值的选项取消免评审资格**：参数里出现带 `=` 且值像路径的选项时，该单元即使命中也**不算只读**（多取消一次免评审，好过少取消一次）。在**声明了档案**的命令上，这条路靠 `safeOptions`（声明哪些选项的取值不是文件，如 `--glob`）+ `unsafeOptions`（声明哪些选项会写文件或执行程序，如 `--output`）来精确控制；未声明档案的命令仍然只看**形状**（D29）。
+- **形状规则封不住“值不像路径”的写法**（`git log --output out.txt`、`git diff --output x.txt`）：这类调用只能靠 `unsafeOptions` 封。内置 `vcs-read` 档案已经把 `--output` / `--ext-diff` 列进去（FR-66），`=` 写法与空格写法都会取消免评审，因此这个残余面在默认配置下已经关上。
+- **git 级选项靠前缀匹配挡着**：`git -c core.fsmonitor=<cmd> status`（实测会执行外部程序）不命中 `argv` 前缀为 `git status` 的档案，因此不免评审。`-c` / `-C` 写在子命令**之后**时是合法无害的（`git log -c` 合并 diff、`git log -C` 检测复制、`git ls-files -o` 列未跟踪文件），所以**不能**把它们列进黑名单（会误伤）。谁把档案前缀放宽到 `["git"]`，谁就必须自己把这些 git 级选项补进 `unsafeOptions`。
 - **未知命令按 write 归因**：`grep -rn x src/` 里的 `src/` 会被记为写方向，从而可能命中 `path_write` 规则。方向比实际更严格，是 fail-closed 的有意选择；需要精确归因的用户可以把命令写进 `permission.bash` 规则或扩展 `readOnlyCommands`。
 - **opaque 包装器不提取路径**：`bash -c 'rm -rf /'` 的参数是代码文本；`indirection` 包装器的参数仍是真实参数（`sudo rm -rf /tmp/x`），照常提取。
 - **动态路径保持字面**：不把 cwd 拼上去（拼接会造出一个看起来真实的假路径），单元同时标记 `dynamic-path`，由 `onUnresolvedFacts` 兜底。
-- **白名单命令的参数可能不是文件**：`git diff HEAD~1` 的 `HEAD~1` 会被当成读路径候选（因为"白名单命令的参数按定义就是文件"）。它通常不命中任何规则、也不改结论，但用户若把 `path_read` 收得很紧，这类"不是文件的参数"会被一起收紧。这是为 `cat secrets.pem` 这类无分隔符文件名故意付出的代价。
+- **白名单命令的参数可能不是文件**：`git diff HEAD~1` 的 `HEAD~1` 会被当成读路径候选（因为档案把位置参数声明为 `paths`）。它通常不命中任何规则、也不改结论，但用户若把 `path_read` 收得很紧，这类"不是文件的参数"会被一起收紧。这是为 `cat secrets.pem` 这类无分隔符文件名故意付出的代价；不想付就用 `pattern` 角色（`rg -n "\.env" src/` 的搜索模式就是这样摘出去的，FR-65）。
 - **路径双形与外部目录**：`lexical` 用目标平台自己的路径实现（`path.posix` / `path.win32`）计算，与被测平台无关；`canonical` 只在目标平台与宿主一致时解析，且对不存在的写目标用"最近存在祖先的真实路径 + 剩余片段"拼出。
 - **真实路径必须对未折叠的路径做 realpath**：`cat ./link/../shadow` 的词法形折叠成 `<cwd>/shadow`，而内核是**先解析软链接再处理 `..`**。先折叠会让真实形与词法形一起错，并把路径错判成"根目录内"，从而绕过外部目录规则。
 - **有真实形时只信真实形**：两侧都取真实形再比（根目录自己也可能是指向别处的软链接），只在拿不到真实形时退回词法形比较。否则"根内路径 + `..` 穿软链接"会被判成根内。
@@ -487,6 +503,32 @@ parser.setLanguage(await Language.load(bashWasm));
 - **MSYS / Cygwin 盘符路径先归一**（仅 Windows 目标平台）：`/c/Users/x` → `C:\Users\x`、`/cygdrive/c/x` → `C:\x`、`/c` 与 `/c/` → `C:\`。git-bash 下的写操作必须能被 `C:\Users\**` 这类规则命中，否则会静默落到一个拼在 cwd 下的假路径上。只认"单个字母挂载点"：`c/x`（相对）、`./c/x`、UNC（`//server/share`）不做这个转换；POSIX 目标平台下 `/c/...` 就是普通绝对路径。
 - **`roots` 必须是绝对路径**：事实层只有"路径"概念、没有会话 cwd，因此 `allowRoots` 里写相对路径（`../shared-lib`）或 `~`（`~/dev/monorepo`）时，**组装 FactsContext 的一方**（M3 会话层）负责展开为绝对路径。事实层对相对形式的根目录一律不匹配（宁可判为外部）。
 - **realpath 缓存只覆盖单次提取**：缓存跨调用复用会把"当时"的真实路径当成现在的事实（软链接目标变了、文件删了都不会失效），事实层就不再是输入的纯函数。`extractFacts` 入口会清空缓存。
+
+### 5.4 只读档案与选项名单
+
+免评审的输入从“一个 argv 前缀”升级为“档案 + 选项名单”（FR-65~FR-69），判定的落点仍在 `evaluateObject` 的第 2 步（用户规则之后、`unresolved` 之前），优先级不变。
+
+```
+argv（可执行名 + 参数）
+   │
+   ├─ 档案匹配（第一个命中的生效）：用户条目 → 内置分组 → 旧字符串白名单
+   │
+   ├─ 位置参数角色：paths（read 路径）/ pattern（不是文件）/ script（整体命中正则白名单）
+   │
+   ├─ 选项名单：unsafeOptions（命中即取消）/ allow-list 的 safeOptions / 带路径值选项的形状规则
+   │
+   └─ 取消原因（readOnlyCancel）→ 审计 + 理由 + /perm status
+```
+
+- **档案是数据，判定是纯函数**：内置分组的数据在 `config/readonly.ts`（配置层），匹配与判定在 `facts/bash/readonly-commands.ts`（事实层）。配置层把“分组 + 用户条目 + 旧字符串条目”展开成一个有序列表交给事实层，事实层不读配置。
+- **顺序就是优先级**：用户条目排在最前，因此“写一条更严的 `rg` 档案”是压制内置档案的正规做法；旧字符串白名单排最后，只作兜底。
+- **组件分离的原因**：`argv.ts` 负责把语法树节点摊成 token（选项 / 位置参数 / `--opt=value` 的取值 / 动态标记），`readonly-commands.ts` 只做档案比对，`path-tokens.ts` 按角色归因路径。把“哪些词是路径”从“像不像路径”变成“档案怎么说”，是本次优化的核心。
+- **降级方向恒定**：任何看不懂的形态（选项名动态、脚本不匹配、路径位置取值不可知、透明前缀布局看不透）都只是取消免评审或升级为不可信，不会放宽成放行；没有命中档案的命令行为与旧实现逐字一致（D29）。
+- **内推发生在参数分析之前**：透明前缀（FR-12 修订）由 `enumerate.ts` 在调用 `analyzeCommandArgs` 之前解析掉，因此档案匹配、路径角色、选项名单看到的都是**内层命令**的 argv；事实层只往里传一个 `startArgument` 下标，切片与空词对齐在 `argv.ts` 里统一处理。
+- **`onlyWithinRoots`**：档案可以要求“目标落在项目根内”才免评审（`cd` / `pushd` 用它：进项目目录是只读操作，出到外部不是）。它需要路径目标，因此判定与取消原因（`outside-roots` / `no-path-target`）都由事实层在 `isReadOnlyUnit` / `readOnlyCancelFor` 里给，而不是只靠 argv。
+- **导航命令的目标不可知时不算“读懂”**：`cd -`、无参数 `pushd`、`popd` 的目标静态不可确定（`cd -` 上次在哪、栈顶是什么都不知道），因此这些单元本身升级为 `dynamic-path`，走 `onUnresolvedFacts`，不能因为它们“参数里没有动态取值”就成了干净的只读命令。
+- **组合命令逐单元独立判断**：每个命令单元各自求值（`evaluateCall`），调用级动作取各对象**最严格者**——全部单元免评审才 `allow`，任一单元需要评审就 `review`（`cd src && rg -n x` → allow；`cd src && npm test` → review）。唯一比“逐单元最严”更严的是 allow 与 deny 同时出现时的 `onMixedCommandActions` 规则（默认 deny）。注意一个 bash 调用**不可分割**：“只放行前半段”在 bash 里不存在，因此这里只能取最严。
+- **可观测**：`CommandUnit.readOnlyCancel` → `PolicyObject.readOnlyCancel` → 审计条目字段 / 判定理由 / `/perm status`。未命中档案不记取消原因（那不是“被取消”，而是本来就不在白名单里）。
 
 ## 6. 规则引擎与配置
 

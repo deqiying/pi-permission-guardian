@@ -167,12 +167,50 @@
     // allowRoots：视为"内部"的额外根目录。monorepo 里加入兄弟包路径，避免正常读写被判成外部目录访问。
     //   支持 ~/ 与 $HOME/ 展开，例如 ["../shared-lib", "~/dev/monorepo"]。
     "allowRoots": [],
-    // readOnlyCommands：只读命令白名单（FR-9），命中即 allow、不产生评审调用。
-    //   匹配方式是"命令单元的可执行名 + 参数前缀"："git status" 匹配 `git status --short`，不匹配 `git push`。
-    //   省略该字段时使用内置集；一旦显式配置数组，该数组**完整覆盖**内置集（不是增量追加，配 [] 即关掉默认白名单）。
-    //   下面显式列出内置集只是为了展示写法：内置集保持最小且通用，按项目需要增删即可。
-    //   两条护栏限制免评审范围：带路径值的 --opt=value 选项会取消该次调用的免评审资格；
-    //   解析没读懂的命令（解析失败、bash -c / eval、参数带无法静态展开的取值）一律不判只读。
+    // readOnly：结构化只读命令档案（FR-65~FR-67），免评审的“主名单”。
+    //   与下面的 readOnlyCommands 并存：新键能声明“哪个参数是模式、哪个是路径、哪些选项会写文件”。
+    "readOnly": {
+      // profiles：启用的内置分组。默认开六组，都是 agent 高频且已逐条核实过危险选项的命令：
+      //   search→ rg / grep / find；vcs-read→ git 的只读子命令（status/diff/log/show/branch 查询形式…）；
+      //   nav→ cd / pushd，但仅限“目标在项目根内”（onlyWithinRoots；进项目目录是只读操作，出到外部不是）；
+      //   text-read→ cat/head/tail/ls/stat/file/tree…；print→ echo/printf；system→ date/du/df/which/ps…
+      //   默认关闭的两组（需要时加上即可）：text-tools（sort/diff/uniq/tr/jq…）、meta（node --version 等版本查询）。
+      //   配 [] 表示不用任何内置档案，只用自己的 commands。
+      //   注意：内置档案只声明“什么情况下可以免评审”，不改变任何规则判定。
+      "profiles": [
+        "search",
+        "vcs-read",
+        "nav",
+        "text-read",
+        "print",
+        "system"
+      ],
+      // commands：自定义档案，字符串或对象。排在分组前面，因此可以写一条更严的档案压住内置档案。
+      //   对象字段：argv（前缀，必填）、roles（位置参数角色：pattern / paths / script，缺省 ["paths"]）、
+      //   script（script 角色必须整体命中的正则集）、optionPolicy（deny-list 缺省 / allow-list）、
+      //   safeOptions、unsafeOptions、onlyWithinRoots（true = 要求目标全部落在项目根内）、reason。
+      //   示例（sed 只放行 `-n 'N,Mp' <file>` 形态；注意模式写松就会失去保护）：
+      //   { "argv": ["sed"], "roles": ["script", "paths"],
+      //     "script": ["^[0-9]+(,[0-9]+)?p$", "^[0-9]+(,[0-9]+)?d$"],
+      //     "optionPolicy": "allow-list", "safeOptions": ["-n", "--quiet", "--silent", "--posix"],
+      //     "unsafeOptions": ["-i", "--in-place", "-e", "--expression", "-f", "--file"],
+      //     "reason": "只放行 sed -n 'N,Mp' <file>" }
+      "commands": [],
+      // unsafeOptions：用户级全局选项黑名单，对所有档案生效（含内置分组与下面的 readOnlyCommands）。
+      //   按词前缀匹配（"--pre" 同时覆盖 "--pre-glob"），命中即取消免评审。跨层取并集：只收紧，不放宽。
+      "unsafeOptions": [],
+      // sinks：额外的“写入不算副作用”的目标（FR-67）。内置 /dev/null 与 win32 下的 NUL 总是生效，
+      //   这里只做追加（例如容器里的 /dev/fd/3）。跨层取交集：追加 sink 等于放宽，下层不能单方面扩大。
+      "sinks": []
+    },
+
+    // readOnlyCommands：旧的字符串白名单（FR-9），命中即 allow、不产生评审调用。
+    //   匹配方式是“可执行名 + 参数前缀”：“git status” 匹配 `git status --short`，不匹配 `git push`。
+    //   它只能声明“这些参数都当路径看”，因此无法表达“搜索模式不是路径”或选项黑名单 ——
+    //   需要这些能力就写 readOnly.commands。
+    //   省略该字段时使用内置集；一旦显式配置数组，该数组**完整覆盖**内置集（不是增量追加，配 [] 即关掉）。
+    //   下面的清单与内置集一致；由于 readOnly 的内置分组排在它前面，`git status` 这类调用
+    //   实际上先命中分组里的档案（带 unsafeOptions，因此 `git diff --output out.txt` 也被挡住）。
     "readOnlyCommands": [
       "pwd",
       "ls",

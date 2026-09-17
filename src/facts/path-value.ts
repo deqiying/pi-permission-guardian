@@ -283,3 +283,28 @@ function tryRealpath(target: string): string | undefined {
 export function resetPathValueCache(): void {
   canonicalCache.clear();
 }
+
+/** URL 形态（`https://host/path`）：不是文件路径，当作路径候选会产生误判。 */
+const URL_PATTERN = /^[a-z][a-z0-9+.-]*:\/\//i;
+
+/**
+ * 看起来像路径：含分隔符、以 `~` / `.` / `/` 开头、或带盘符。
+ *
+ * 这是**形状启发式**，不是判定：未知命令的参数靠它筛出路径候选（FR-15 的旧口径），
+ * 声明了只读档案的命令则不靠它——那些命令的路径位置由档案的 `roles` 显式给出（FR-65）。
+ */
+export function looksLikePath(text: string): boolean {
+  if (text.length === 0 || URL_PATTERN.test(text)) {
+    return false;
+  }
+  if (text.includes("/") || text.includes("\\")) {
+    return true;
+  }
+  if (text.startsWith("~")) {
+    return true;
+  }
+  if (text.startsWith(".")) {
+    return true;
+  }
+  return /^[A-Za-z]:$/.test(text) || /^[A-Za-z]:[^\\/]/.test(text);
+}

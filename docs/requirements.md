@@ -109,7 +109,7 @@ agent 读取 `~/.pi/agent/` 下的会话文件，或写入 `../other-project/` �
 | 编号 | 需求 | 验收标准 |
 |---|---|---|
 | FR-11 | `bash` 命令使用 tree-sitter-bash 解析为 AST，并枚举出全部**命令单元**：顶层命令、管道、`&&` / `||` / `;` 序列、子 shell、命令替换 `$(…)` 与反引号、进程替换 `<(…)` / `>(…)` | 每种构造有单测，断言枚举结果包含内层命令 |
-| FR-12 | 识别并标注**包装器**：opaque（`bash -c`、`sh -c`、`eval`）与 indirection（`sudo`、`env`、`xargs`、`nohup`、`timeout`、`find -exec` 等）。opaque 包装器内部无法静态展开，必须按 `onUnresolvedFacts` 处理，**不得放行** | 包装器用例断言产生的 intent 带 `unresolved` 标记 |
+| FR-12 | 识别并标注**包装器**：opaque（`bash -c`、`sh -c`、`eval`）与 indirection（`sudo`、`xargs`、`exec`、`find -exec` 等），一律按 `onUnresolvedFacts` 处理，**不得放行**。**例外（2026-09 修订，D33）**：规则固定、不改变后面命令的**透明前缀**（`timeout` / `nice` / `ionice` / `stdbuf` / `nohup` / `time` / `env` / `command`，最多内推 3 层）可以内推：跳过它自己的参数后，后面的命令就是真正要执行的东西，按内层命令判定。`command -v` / `-V` 是**查询**而不是执行，不内推（按 `system` 分组的档案免评审） | 包装器用例断言产生的 intent 带 `unresolved` 标记；透明前缀用例断言 `unwrappedText` 与内层命令的只读资格（`timeout 5 cat f` → 与 `cat f` 同）；`sudo` / `xargs` / `bash -c` / 动态内层命令（`timeout 5 $CMD`）仍带 `unresolved`；内层命令文本作为**额外规则目标**（`timeout 30 rm -rf ./dist` 能被 `rm -rf ./dist*` 规则命中，外层文本仍能被 `timeout *` 命中） |
 | FR-13 | 分析重定向：`>` `>>` 为写、`<` 为读、`<>` 为读写不可证 | 各构造有单测 |
 | FR-14 | 解析失败的子树必须降级：整条命令标记 `unresolved`，按 `onUnresolvedFacts` 处理 | 构造已知解析失败样例（如 heredoc + `2>&1` + pipe）验证降级 |
 | FR-15 | 从命令单元中提取路径候选并按读/写效应归因；展开 `$HOME` / `${HOME}` / `$PWD` / `~`；非字面量（`"$DIR"`、命令替换结果）保持字面并标记 `unresolved` | 路径提取与归因有单测 |
@@ -197,6 +197,21 @@ agent 读取 `~/.pi/agent/` 下的会话文件，或写入 `../other-project/` �
 | FR-61 | 同一调用中同时存在 `unresolved` facts 和至少一个可信对象明确得到 `deny` 时，最终动作固定为 `ask`；不可静态确定的对象在**未命中用户规则时**按 `onUnresolvedFacts` 处理（对象级：不覆盖已命中的显式规则，也不被默认矩阵架空） | 有 `unresolved + deny`、`unresolved + allow/review` 两类测试；前者不得被 `onUnresolvedFacts` 放宽为 `review`；显式 `permission.powershell = "ask"` 不得被默认 `review` 放宽 |
 | FR-62 | `bash` / `powershell` 规则的模式匹配目标包含**每个命令单元的文本**与**调用级文本**（整条命令、管道、`&&`/`||`/`;` 序列、子 shell、命令替换等容器节点的规范化文本），使 `curl * \| sh` 这类跨单元模式能命中 | 参考配置里的三条管道级模式均有命中测试；引号内的假管道不得产生匹配目标；书写风格（`curl a\|sh` 与 `curl a \| sh`）必须得到同一文本 |
 
+### 6.10 只读免评审：命令档案与选项名单
+
+背景：只读判定若只看“argv 前缀”，`rg` 这类命令要么进不了白名单（每次搜索都等一次模型评审），要么一进白名单就把 `rg --pre` 这种“选项即程序”的写法一起放行。本节把免评审从单一维度升级为**双名单**：档案声明“这条命令本质只读”，选项名单声明“这些选项会写文件 / 执行程序 / 改工作目录”。
+
+| 编号 | 需求 | 验收标准 |
+|---|---|---|
+| FR-65 | 支持结构化**只读命令档案**：`argv` 前缀 + 位置参数角色（`paths` / `pattern` / `script`）+ 选项名单（FR-66）+ 可选的 `onlyWithinRoots`（免评审要求目标落在项目根内）+ `reason`。档案有三类来源，**顺序即优先级**：用户条目 → 内置分组 → 旧字符串白名单；命中的第一个档案决定判定。内置分组为 `search`（rg/grep/find）、`vcs-read`（git 只读子命令）、`nav`（`cd` / `pushd`，仅限项目内目录）、`text-read`（cat/head/ls/stat/file/tree…）、`print`（`echo` / `printf`，位置参数是文本不是文件，角色为 `pattern`）、`system`（date/du/df/lsof/which/type/`command -v`/ps…）、`text-tools`、`meta`；默认开启前六个（D28） | 角色化归因有单测（`rg -n "\.env" src/` 的模式不得再被当成路径）；档案顺序有测试（用户条目能压住内置档案）；内置每条档案都带 `reason`；未声明档案的命令行为与本需求之前完全一致（D29） |
+| FR-66 | 档案可声明选项策略：`deny-list`（默认，未列出的选项安全，命中 `unsafeOptions` 即取消免评审）或 `allow-list`（只有 `safeOptions` 列出的选项安全）；另可配用户级全局 `unsafeOptions`，对所有档案（含内置分组与旧字符串条目）生效。匹配为**词前缀**（`--pre` 同时覆盖 `--pre=x` 与 `--pre-glob`） | `find . -delete`、`sort -o out.txt`、`rg --pre …`、`git branch -D` 各有负向用例（都不得免评审）；`git log --output out.txt` 不再免评审（封死 §8.2 的残余面）；`git log -c` / `git log -C` / `git ls-files -o` 实测为合法无害选项，不得误伤 |
+| FR-67 | 写向**空设备**的重定向不产生路径目标、不算写副作用：`/dev/null` 在 POSIX 与 win32 都生效，`NUL` **仅 win32**（POSIX 上的 `> NUL` 会真的创建文件）。可经 `workingDirectory.readOnly.sinks` 追加额外 sink；跨层取交集（追加 sink 等于放宽，下层不能单方面扩大） | `ls 2>/dev/null`、`cat f >/dev/null` 免评审；`src/dev/null` 这类同名子路径**不得**被当成 sink；`cat f 2> NUL` 在 linux 语义下仍产生写目标 |
+| FR-68 | 动态取值按**角色**分流：落在 `pattern` 角色不影响免评审（`rg "$PAT" src/`），落在 `paths` 角色仍按 FR-15 降级为 `unresolved`；未声明安全含义的取值（选项名动态、脚本动态、未声明安全的带值选项取动态值）仍按不可静态确定处理 | 三类各有用例；`onUnresolvedFacts=deny` 时 `git diff --output="$OUT"` 必须仍被拦（不得被降级成普通评审） |
+| FR-69 | 免评审被取消时必须可解释：审计条目携带 `readOnlyCancel`（`redirect-write` / `unsafe-option` / `option-not-allowed` / `option-path-value` / `script-not-allowed` / `dynamic-arg` / `unexpected-arg`，可带 detail），判定理由与 `/perm status` 均可见；未命中档案（本来就不在白名单）不记取消原因 | 审计字段有测试；`/perm status` 显示启用的分组、条目数与全局黑名单 |
+| FR-70 | 工作目录按 bash **作用域**跟踪：字面 `cd <路径>` / `pushd <路径>` 之后的相对路径按新目录解析；管道元素、子 shell、命令替换各自独立（`cd x \| cat y` 的 `y` 仍按会话 cwd）；`cd -` / `cd $DIR` / `popd` 之后该作用域内后续单元的相对路径一律降级为 `dynamic-path`。“哪些目录算内部”仍按会话根目录判定（`cd /tmp` 不会把 `/tmp` 变成内部目录） | 四类作用域各有测试；`(cd /tmp && rm x)` 的写目标是 `/tmp/x`；`cd $DIR && cat x` 两个单元都降级 |
+
+> **不变量（不得被本节的需求破坏）**：用户层规则仍优先于免评审；`deny` 永不被免评审或会话授权覆盖；免评审只作用于**命令对象**，路径对象独立投票（`cat .env` 仍会被 `*.env: deny` 拦住）；解析失败、PowerShell、opaque 包装器一律不判只读。
+
 ## 7. 关键设计决策
 
 以下 D1–D25 为当前设计决策；D1–D10、D16–D25 已由用户确认，D11–D15 为调研与评审后新增。
@@ -223,7 +238,13 @@ agent 读取 `~/.pi/agent/` 下的会话文件，或写入 `../other-project/` �
 | **D18** | 跨命令单元的 `allow` / `deny` 冲突不强制固定为 `deny`，新增 `onMixedCommandActions`：默认 `deny`，可配置 `ask` / `review` / `deny` | 同一条 shell 调用可能由多个独立命令单元组成，固定整条拒绝会损失可重建或低风险子操作的执行能力；把冲突消解策略显式配置，同时默认保持原行为。为保证项目配置不能借混合命令放宽全局底线，该字段跨层按 `deny > ask > review` 合并，项目层只能收紧，不能放宽 |
 | **D19** | 项目许可证使用 **Apache License 2.0** | 允许商业使用、修改、分发，并包含明确的专利授权条款；仓库提交完整 `LICENSE`，未来 `package.json` 使用 `"license": "Apache-2.0"` |
 | **D20** | 审计日志按进程本地日期切分，默认保留 14 天，保留期可配置 | 避免单文件无限增长；可通过 `auditLog.retentionDays` 调整；清理失败只告警，不影响工具裁决 |
-| **D21** | 内置只读集合保持尽可能小且通用；匹配固定为“可执行名 + 参数前缀”；用户显式配置 `readOnlyCommands` 时完整覆盖内置默认集 | `[]` 可明确关闭；不做特殊选项白名单分支，边界行为保持可解释；完整替换避免默认集悄悄扩张 |
+| **D21** | **内置只读档案默认开启最小分组，且每条都必须有依据与负向测试**（本决策取代原“集合尽可能小 + 只看 argv 前缀”的设计）：免评审 = 档案（argv 前缀 + 位置参数角色 + 选项名单）∪ 旧字符串白名单；默认分组为 `search` + `vcs-read`（`rg` / `grep` / `find` / git 只读子命令）；`find`、`git branch` 这类“危险选项密集”的命令用 `allow-list`，其余用 `deny-list` | 只看前缀的旧设计有两个不可接受的后果：把 `rg` 关在白名单外等于每次搜索都要一次模型评审；把 `rg` 放进去则 `rg --pre <程序>` 直接放行（实测每个被搜文件 spawn 一次）。角色化 + 选项名单让两者同时成立。旧字符串白名单语义不变（用户显式数组仍完整覆盖内置字符串集，`[]` 仍可关闭），`workingDirectory.readOnly` 是新键 |
+| **D28** | 内置档案**默认开启高频集合**（`["search","vcs-read","nav","text-read","print","system"]`，2026-09 用户决策从“最小集”放宽），并可用 `readOnly.profiles: []` 整体关闭。`nav` 只含 `cd` / `pushd` 两条，且都带 `onlyWithinRoots`：**进项目内目录**免评审，`cd ..` / `cd /tmp` / `cd ~` / 无参数 `cd` / `cd -` / `popd` 一律不免。`print`（`echo` / `printf`）的角色是 `pattern`：它们的参数是文本而不是文件，因此不会产生读路径、也不会因为“`echo note.env`”而撞上 `*.env` 规则 | 用户痛点是“常见只读命令也走评审”，因此默认面要覆盖常见组合命令（`rg … && echo done`、`cd src && rg …`、`which node && date`）；每一组都逐条核实过危险选项（`rg --pre`、`find -delete`、`git --output`、`tree -o`、`date -s`）；仍有两组默认关闭（`text-tools`：sort/diff/jq…；`meta`：版本查询），因为它们的危险选项（`sort -o` / `--compress-program`）或本机未逐条核实（jq）需要用户显式声明。属于安全相关的默认值变更，发布说明必须显式写出 |
+| **D29** | 选项语义**只对声明过档案的命令生效**：没有命中档案的命令完全沿用旧口径（形态启发式 + 旧的写方向归因），不会因为“看起来只读”而放宽 | 档案表是数据，未声明的命令必须行为不变（“不扩表就不放宽”）。这也是把 `sed` / `awk` / 裸 `node` / 网络类命令排除在默认分组外的同一个理由 |
+| **D30** | 空设备 sink 固定为 `/dev/null`（两平台）+ `NUL`（仅 win32），可用 `readOnly.sinks` **追加**；跨层取交集 | `NUL` 在 POSIX 是普通文件名（`> NUL` 会真的建文件），按平台区分才不会制造新的免评审口子；追加项取交集是因为“多一个 sink”等于多一条放宽路径 |
+| **D31** | “危险选项密集”的命令一律用 `allow-list`（目前：`find`、`git branch`）；`deny-list` 只用于选项集合稳定、且已逐条核实过写/执行类选项的命令 | `find -delete` / `-fprint` / `-exec` 靠枚举安全选项天然落空；反过来给 `find` 写 deny-list 等于要求维护一份完整的“危险选项清单”，漏一项就是免评审直接放行 |
+| **D32** | `sed` / `awk` / `perl` / 裸 `node` / `python` 与网络类命令（`curl` / `wget` / `gh`）**不进内置分组**；`sed` 只在示例配置里给 `script` 角色 + 整体锚定正则的保守写法 | `sed 'e …'` / `'s/x/y/e'` / `'1w out.txt'` / `-i` 实测都能执行命令或写文件，而脚本体是代码不是数据，静态封堵必须做脚本词法分析，边界不可靠；网络类命令本需求的定义（不改文件）也不覆盖 |
+| **D33** | **透明前缀内推**（2026-09 用户决策）：规则固定、不改变后面命令的前缀（`timeout` / `nice` / `ionice` / `stdbuf` / `nohup` / `time` / `env` / `command`）内推判定；`sudo` / `doas` / `su` / `xargs` / `exec` / `parallel` / `setsid` / `chroot` / `find -exec` 与全部 opaque 包装器**仍不透明**。最多内推 3 层；内层命令名不可静态确定（`timeout 5 $CMD`）时不内推；内推后内层命令文本作为规则的额外目标，外层文本仍然参与匹配 | 这组前缀的参数布局是文档化的固定语法，跳过它们自己的参数（`5`、`-n 5`、`NAME=VALUE`）后，后面的命令就是 bash 真正要执行的东西；`sudo` 可能换用户与执行环境、`xargs` 会把参数拼成新命令、`bash -c` 的内容不在 AST 里，因此继续保持不透明。误判方向恒定：内层命令名对不上任何档案时只是一次评审，不会放行 |
 | **D22** | `unresolved` 与明确 `deny` 同时出现时最终采用 `ask` | 保留对同一调用中高风险意图的人工确认机会；没有明确 `deny` 时仍按 `onUnresolvedFacts` |
 | **D23** | 只有人工确认才能创建会话授权 | 模型 allow、缓存和自动审核都不等于用户授权；避免把模型判断放大为本会话内长期放行 |
 | **D24** | `!command` / `!!command` 纳入 `user_bash` 护栏；`userBashPolicy` 默认开启，自动审核默认开启，模型缺省复用 `reviewer.model`；检测到其他拦截器冲突时只提示，不强制顺序 | 用户直接执行不再形成默认绕过通道；共存冲突可见，同时避免插件争抢扩展加载顺序 |
@@ -260,7 +281,12 @@ agent 读取 `~/.pi/agent/` 下的会话文件，或写入 `../other-project/` �
 | `cmd <<'EOF'` 的引号 heredoc 正文是字面数据，不是命令 | 不逐条枚举正文（`cat <<'EOF'` 下 `$(rm -rf /)` 不会被执行）；若正文其实会被执行（`bash <<EOF`），由 opaque 包装器降级兜住 |
 | `> file`（合法但无 body 的重定向语句） | 产出写目标：bash 会真的截断/创建文件，不产出对象就会让写目标对规则不可见 |
 | UNC 路径（`\\server\share\x`） | 只做词法归一，**不**解析真实路径：realpath 会对网络位置发起 SMB 访问，可能阻塞数十秒，而 `tool_call` 不能阻塞 |
-| 子命令族带写文件选项（`git diff --output=<file>`） | 保留在免评审白名单内（对工作目录的只读操作应当免评审）；`--output=<值像路径>` 这类形状会取消免评审资格，空格写法与值不像路径的写法是已知残余面，可用 `"git diff --output*": "review"` 封死 |
+| 子命令族带写文件选项（`git diff --output=<file>`） | **已由 FR-66 封死**：内置 `vcs-read` 档案把 `--output` 列进 `unsafeOptions`，`=` 写法与空格写法都会取消免评审。旧的字符串白名单条目（`readOnlyCommands`）本身仍有这个残余面，但它在优先级上排在分组之后，因此在默认配置下不会生效 |
+| 环境变量 / 工具配置文件注入的执行点 | `RIPGREP_CONFIG_PATH` 指向的文件里写 `--pre=…` 时，argv 完全干净也能 spawn 程序（同类：`GIT_EXTERNAL_DIFF`、`git config core.pager`、`LESSOPEN`）。档案表只看 argv，因此**不覆盖这一层**；需要极致的用户应在自己的默认配置里写 `--no-config` 一类开关 |
+| 透明前缀内推只看参数布局 | `env X=1 timeout 5 cat f` 能逐层内推到 `cat f`，但层数上限 3；跳过参数靠的是各命令文档化的语法，因此 `timeout -s KILL 5 cat f` 这类带取值选项需要在内推规则里有对应声明（已覆盖 `-s` / `-k` / `--signal` / `--kill-after`）。布局看不透时**不内推**（`timeout -X 5 cat f` 里的未知选项会让它落到不透明分支 → `onUnresolvedFacts`），方向恒定安全 |
+| 组合命令的执行粒度 | 一个 bash 工具调用是不可分割的：`cat f && rm -rf x` 只能整体放行或整体拦。逐单元独立评估 + 调用级取最严保证了“任一单元需要评审就整条去评审”，但无法做到“只放行前半段” |
+| 空格写法的选项值可能被当成位置参数 | `rg --max-columns 200 x` 里的 `200`、`find -name '*.log'` 里的 `'*.log'` 会作为**read** 方向的幽灵路径目标参与规则匹配。方向是过严（可能多命中一条 `path_read` 规则），不会放宽；需要精化就写一条更具体的档案条目 |
+| 未声明档案的命令 | 仍然逐次评审（D29）。这是有意的：`sed` / `awk` / 裸 `node` / 网络类命令无法用 argv 静态判定安全性（见 D32），把它们加进白名单等于用一个错误的假设换性能 |
 
 ### 8.3 性能预算
 
@@ -296,6 +322,8 @@ agent 读取 `~/.pi/agent/` 下的会话文件，或写入 `../other-project/` �
 | ~~Q5~~ | ~~是否需要"只读命令白名单"的内置默认集？~~ **已确认（2026-09-16）**：内置一小组高置信命令；显式数组完整覆盖，见 FR-9 / D21 | — |
 | ~~Q6~~ | ~~插件标识符命名~~ **已确认（2026-09-16）**：见下表 | — |
 | ~~Q7~~ | ~~失效层里显式写的 `yoloMode: true` 会被原样抢救，从而把 D26 的 `ask` 落点重写为 `allow`~~ **已确认（2026-01）**：选收紧——失效层不参与 `yoloMode` 投票，见 FR-53 / D27 | — |
+| ~~Q8~~ | ~~`rg` 等常见只读命令也要走评审，白名单只看 argv 前缀导致识别不够灵活~~ **已确认（2026-09）**：采用命令档案 + 选项名单（FR-65~FR-69），默认开启 `search` + `vcs-read` 最小集，见 D21 / D28~D32 | — |
+| ~~Q9~~ | ~~是否把 `cd` / `pushd` 也放进默认免评审集？~~ **已确认（2026-09，用户决策）**：`cd` 进入**当前项目目录**可以进白名单；因此新增 `nav` 分组并默认开启，用 `onlyWithinRoots` 把“项目内”这个条件交给事实层判定（`cd ..` / `cd /tmp` / `cd ~` / 无参数 `cd` / `cd -` / `popd` 不免），见 FR-65 / D28。组合命令按单元独立判断（`cd src && rg -n x` → allow） | — |
 
 ### 命名定稿（2026-09-16）
 
