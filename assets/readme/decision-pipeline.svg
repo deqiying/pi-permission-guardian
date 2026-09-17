@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="470" viewBox="0 0 1200 470"
+     role="img" aria-labelledby="pipeTitle pipeDesc">
+  <title id="pipeTitle">pi-permission-guardian 决策管线</title>
+  <desc id="pipeDesc">tool_call 与 user_bash 共用的一条管线：facts（tree-sitter-bash 解析出命令单元与路径）→ policy（glob 规则、只读白名单、默认动作矩阵）→ review（仅名单未命中或标记 review 的调用才交给独立评审模型）→ decide（allow 放行、ask 人工、deny 拦截）。名单命中时从 policy 直连 decide，跳过评审、零模型调用；解析失败、评审 unavailable、无 UI 确认等不确定状态落到失败分支并默认 fail-closed；审计与状态栏等后置动作不阻塞决策。</desc>
+
+  <rect width="1200" height="470" rx="24" fill="#0a0d11"/>
+
+  <text x="64" y="36" font-size="18" letter-spacing="1.4" fill="#8c9aa8"
+        font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Cascadia Mono', monospace">DECISION PIPELINE · tool_call &amp; user_bash</text>
+
+  <!-- 快路径：名单命中时从 policy 直连 decide -->
+  <g id="fast-rail" fill="none" stroke="#8c9aa8" stroke-opacity="0.55" stroke-width="1.4" stroke-dasharray="6 6">
+    <path d="M466 104 L466 76 L1016 76 L1016 96"/>
+  </g>
+  <path d="M1011 94 L1016 104 L1021 94 Z" fill="#8c9aa8" fill-opacity="0.75"/>
+  <text x="741" y="62" font-size="19" text-anchor="middle" fill="#c3cfda"
+        font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">名单命中即裁决：零模型调用、零弹窗</text>
+
+  <!-- 主链：facts → policy → review → decide -->
+  <g id="stages" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">
+    <rect x="64" y="104" width="252" height="136" rx="12" fill="#121820" stroke="#222b35"/>
+    <rect x="340" y="104" width="252" height="136" rx="12" fill="#121820" stroke="#222b35"/>
+    <rect x="616" y="104" width="252" height="136" rx="12" fill="#121820" stroke="#222b35"/>
+    <rect x="892" y="104" width="248" height="136" rx="12" fill="#121820" stroke="#222b35"/>
+
+    <g id="stage-facts">
+      <text x="88" y="138" font-size="24" font-weight="600" fill="#e9eff5">facts</text>
+      <text x="88" y="170" font-size="19" fill="#8c9aa8"
+            font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Cascadia Mono', monospace">tree-sitter-bash</text>
+      <text x="88" y="200" font-size="19" fill="#8c9aa8">命令单元 · 路径</text>
+    </g>
+
+    <g id="stage-policy">
+      <text x="364" y="138" font-size="24" font-weight="600" fill="#e9eff5">policy</text>
+      <text x="364" y="170" font-size="19" fill="#8c9aa8">glob 规则 · 白名单</text>
+      <text x="364" y="200" font-size="19" fill="#8c9aa8">默认矩阵 · 最严格者</text>
+    </g>
+
+    <g id="stage-review">
+      <text x="640" y="138" font-size="24" font-weight="600" fill="#e9eff5">review</text>
+      <text x="640" y="170" font-size="19" fill="#8c9aa8">独立评审模型</text>
+      <text x="640" y="200" font-size="19" fill="#8c9aa8">未命中或 review</text>
+    </g>
+
+    <g id="stage-decide">
+      <text x="916" y="138" font-size="24" font-weight="600" fill="#e9eff5">decide</text>
+      <text x="916" y="170" font-size="19" fill="#8c9aa8"
+            font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Cascadia Mono', monospace">allow · ask · deny</text>
+      <text x="916" y="200" font-size="19" fill="#8c9aa8">放行 · 人工 · 拦截</text>
+    </g>
+  </g>
+
+  <!-- 阶段之间的实心箭头 -->
+  <g id="flow-arrows" fill="none" stroke="#59636e" stroke-width="1.6">
+    <path d="M320 172 L332 172"/><path d="M328 167 L338 172 L328 177 Z" fill="#59636e" stroke="none"/>
+    <path d="M596 172 L608 172"/><path d="M604 167 L614 172 L604 177 Z" fill="#59636e" stroke="none"/>
+    <path d="M872 172 L884 172"/><path d="M880 167 L890 172 L880 177 Z" fill="#59636e" stroke="none"/>
+  </g>
+
+  <!-- 失败总线：解析失败 / 评审不可用 / 无 UI 确认都汇入失败分支 -->
+  <g id="failure-bus" fill="none" stroke="#ef5f5f" stroke-opacity="0.45" stroke-width="1.4" stroke-dasharray="6 6">
+    <path d="M190 240 L190 264"/>
+    <path d="M742 240 L742 264"/>
+    <path d="M1016 240 L1016 264"/>
+    <path d="M190 264 L1016 264"/>
+    <path d="M466 264 L466 286"/>
+  </g>
+  <path d="M461 284 L466 294 L471 284 Z" fill="#ef5f5f" fill-opacity="0.7"/>
+
+  <g id="failure-and-post" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">
+    <rect x="64" y="292" width="1072" height="88" rx="12" fill="#0f141a" stroke="#1c242d"/>
+    <text x="88" y="322" font-size="19" fill="#c3cfda">失败分支：解析失败 → review；评审 unavailable → deny；无 UI 确认 → deny</text>
+    <text x="88" y="348" font-size="19" fill="#8c9aa8">三个开关默认 fail-closed，但允许显式配 allow</text>
+    <text x="88" y="374" font-size="19" fill="#8c9aa8">后置（不阻塞决策）：审计 JSONL · appendEntry · 熔断计数 · 状态栏</text>
+  </g>
+
+  <text x="64" y="424" font-size="18" fill="#59636e"
+        font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">完整管线（gate、缓存前置条件、授权顺序）见 docs/architecture.md §4</text>
+</svg>

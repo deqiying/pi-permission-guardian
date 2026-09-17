@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420"
+     role="img" aria-labelledby="heroTitle heroDesc">
+  <title id="heroTitle">pi-permission-guardian</title>
+  <desc id="heroDesc">pi coding agent 的权限护栏扩展：左侧是项目名与两行说明（名单命中即裁决、名单未命中或标记 review 才交给独立评审模型），右侧是 config/config.json 中 permission.bash 的真实规则及其裁决动作：rm -rf ./dist → allow、rm * → review、sudo * → ask、curl * | sh → ask、rm -rf / → deny。</desc>
+
+  <rect width="1200" height="420" rx="24" fill="#0a0d11"/>
+
+  <!-- 身份：类别、名称、承诺、仓库元数据 -->
+  <g id="identity" transform="translate(64 0)" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">
+    <text y="96" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Cascadia Mono', monospace"
+          font-size="19" letter-spacing="2.4" fill="#8c9aa8">PI CODING AGENT · EXTENSION</text>
+    <text y="164" font-size="50" font-weight="600" fill="#e9eff5">pi-permission-guardian</text>
+    <text y="220" font-size="22" fill="#c3cfda">名单命中即裁决：零模型调用、零弹窗</text>
+    <text y="252" font-size="22" fill="#c3cfda">名单未命中或标记 review：交给独立评审模型</text>
+    <line x1="0" y1="292" x2="632" y2="292" stroke="#1c242d" stroke-width="1"/>
+    <text y="330" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Cascadia Mono', monospace"
+          font-size="18" fill="#8c9aa8">pi &gt;= 0.85.1&#160;&#160;&#160;&#160;node &gt;= 22&#160;&#160;&#160;&#160;Apache-2.0&#160;&#160;&#160;&#160;v0.1.1</text>
+  </g>
+
+  <!-- 证据：参考配置里真实存在的 bash 规则，按动作分组 -->
+  <g id="rule-ledger" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Cascadia Mono', monospace">
+    <rect x="748" y="68" width="388" height="284" rx="14" fill="#121820" stroke="#222b35" stroke-width="1"/>
+    <text x="772" y="106" font-size="18" fill="#8c9aa8">permission.bash</text>
+    <text x="1116" y="106" font-size="18" text-anchor="end" fill="#59636e">glob -&gt; action</text>
+
+    <g id="rule-allow">
+      <text x="772" y="150" font-size="21" fill="#e9eff5">rm -rf ./dist</text>
+      <rect x="1032" y="132" width="84" height="26" rx="13" fill="#4ac26b" fill-opacity="0.12" stroke="#4ac26b" stroke-opacity="0.5" stroke-width="1.2"/>
+      <text x="1074" y="150" font-size="18" text-anchor="middle" fill="#4ac26b">allow</text>
+    </g>
+
+    <g id="rule-review">
+      <text x="772" y="192" font-size="21" fill="#e9eff5">rm *</text>
+      <rect x="1032" y="174" width="84" height="26" rx="13" fill="#5aa9f0" fill-opacity="0.12" stroke="#5aa9f0" stroke-opacity="0.5" stroke-width="1.2"/>
+      <text x="1074" y="192" font-size="18" text-anchor="middle" fill="#5aa9f0">review</text>
+    </g>
+
+    <g id="rule-ask-sudo">
+      <text x="772" y="234" font-size="21" fill="#e9eff5">sudo *</text>
+      <rect x="1032" y="216" width="84" height="26" rx="13" fill="#e0a63a" fill-opacity="0.12" stroke="#e0a63a" stroke-opacity="0.5" stroke-width="1.2"/>
+      <text x="1074" y="234" font-size="18" text-anchor="middle" fill="#e0a63a">ask</text>
+    </g>
+
+    <g id="rule-ask-pipe">
+      <text x="772" y="276" font-size="21" fill="#e9eff5">curl * | sh</text>
+      <rect x="1032" y="258" width="84" height="26" rx="13" fill="#e0a63a" fill-opacity="0.12" stroke="#e0a63a" stroke-opacity="0.5" stroke-width="1.2"/>
+      <text x="1074" y="276" font-size="18" text-anchor="middle" fill="#e0a63a">ask</text>
+    </g>
+
+    <g id="rule-deny">
+      <text x="772" y="318" font-size="21" fill="#e9eff5">rm -rf /</text>
+      <rect x="1032" y="300" width="84" height="26" rx="13" fill="#ef5f5f" fill-opacity="0.12" stroke="#ef5f5f" stroke-opacity="0.5" stroke-width="1.2"/>
+      <text x="1074" y="318" font-size="18" text-anchor="middle" fill="#ef5f5f">deny</text>
+    </g>
+  </g>
+</svg>
