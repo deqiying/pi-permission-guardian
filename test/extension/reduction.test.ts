@@ -24,28 +24,42 @@ import {
  * 与 `message_end`），预评分只在 `tool_result` 之后异步调度，状态栏与 `appendEntry` 共用一份结论。
  */
 
-let workspace: TempWorkspace | undefined;
+let harness: Harness | undefined;
 
-afterEach(() => {
-  workspace?.cleanup();
-  workspace = undefined;
+afterEach(async () => {
+  const current = harness;
+  harness = undefined;
+  // 审计日志是异步落盘（`AuditLogger.record` 只入队，`flush` 由 `session_shutdown` 触发）：
+  // 不排空就直接删临时目录，删除动作会和 `appendFile` 抢同一个目录。Ubuntu runner 上表现为
+  // `ENOTEMPTY: directory not empty, rmdir '…/extensions/pi-permission-guardian'`。
+  if (current?.ctx !== undefined) {
+    await current.pi.fire(
+      "session_shutdown",
+      { type: "session_shutdown", reason: "quit" },
+      current.ctx,
+    );
+  }
+  current?.workspace.cleanup();
 });
 
 interface Harness {
   pi: FakePi;
   runtime: GuardianRuntime;
   workspace: TempWorkspace;
+  /** 最近一次 `session_start` 的上下文；收尾拿它跑 `session_shutdown`。 */
+  ctx?: ReturnType<typeof createFakeCommandContext>;
 }
 
 function setup(): Harness {
-  workspace = createWorkspace();
+  const workspace = createWorkspace();
   const pi = createFakePi();
   const runtime = registerGuardian(pi, {
-    getAgentDir: () => (workspace as TempWorkspace).agentDir,
+    getAgentDir: () => workspace.agentDir,
     now: () => new Date(2026, 8, 16, 9, 0, 0),
     warn: () => {},
   });
-  return { pi, runtime, workspace };
+  harness = { pi, runtime, workspace };
+  return harness;
 }
 
 async function startSession(
@@ -58,6 +72,7 @@ async function startSession(
     ...options,
   });
   await harness.pi.fire("session_start", { type: "session_start", reason: "startup" }, ctx);
+  harness.ctx = ctx;
   return ctx;
 }
 

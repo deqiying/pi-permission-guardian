@@ -42,29 +42,43 @@ interface Harness {
   runtime: GuardianRuntime;
   workspace: TempWorkspace;
   warnings: string[];
+  /** 最近一次 `session_start` 的上下文；收尾拿它跑 `session_shutdown`。 */
+  ctx?: ReturnType<typeof createFakeCommandContext>;
 }
 
 type ExtensionAPIWithFake = FakePi;
 
-let workspace: TempWorkspace | undefined;
+let harness: Harness | undefined;
 
-afterEach(() => {
-  workspace?.cleanup();
-  workspace = undefined;
+afterEach(async () => {
+  const current = harness;
+  harness = undefined;
+  // 审计日志是异步落盘（`AuditLogger.record` 只入队，`flush` 由 `session_shutdown` 触发）：
+  // 不排空就直接删临时目录，删除动作会和 `appendFile` 抢同一个目录。Ubuntu runner 上表现为
+  // `ENOTEMPTY: directory not empty, rmdir '…/extensions/pi-permission-guardian'`。
+  if (current?.ctx !== undefined) {
+    await current.pi.fire(
+      "session_shutdown",
+      { type: "session_shutdown", reason: "quit" },
+      current.ctx,
+    );
+  }
+  current?.workspace.cleanup();
   // 子代理 registry 是进程级存储，用例之间必须清空，否则 sessionId 复用会造成假命中。
   resetSubagentStore();
 });
 
 function setup(): Harness {
-  workspace = createWorkspace();
+  const workspace = createWorkspace();
   const warnings: string[] = [];
   const pi = createFakePi();
   const runtime = registerGuardian(pi, {
-    getAgentDir: () => (workspace as TempWorkspace).agentDir,
+    getAgentDir: () => workspace.agentDir,
     now: () => new Date(2026, 8, 16, 9, 0, 0),
     warn: (message) => warnings.push(message),
   });
-  return { pi, runtime, workspace, warnings };
+  harness = { pi, runtime, workspace, warnings };
+  return harness;
 }
 
 function context(
@@ -96,6 +110,7 @@ async function startSession(
 ): Promise<ReturnType<typeof createFakeCommandContext>> {
   const ctx = context(harness, options);
   await harness.pi.fire("session_start", SESSION_START, ctx);
+  harness.ctx = ctx;
   return ctx;
 }
 
