@@ -174,7 +174,8 @@
       //   search→ rg / grep / find；vcs-read→ git 的只读子命令（status/diff/log/show/branch 查询形式…）；
       //   nav→ cd / pushd，但仅限“目标在项目根内”（onlyWithinRoots；进项目目录是只读操作，出到外部不是）；
       //   text-read→ cat/head/tail/ls/stat/file/tree…；print→ echo/printf；system→ date/du/df/which/ps…
-      //   默认关闭的两组（需要时加上即可）：text-tools（sort/diff/uniq/tr/jq…）、meta（node --version 等版本查询）。
+      //   默认关闭的两组（需要时加上即可）：text-tools（sort/diff/cmp/jq…；uniq 因第二个位置参数是输出文件而不在表里）、
+      //   meta（node --version 等版本查询）。
       //   配 [] 表示不用任何内置档案，只用自己的 commands。
       //   注意：内置档案只声明“什么情况下可以免评审”，不改变任何规则判定。
       "profiles": [
@@ -188,7 +189,8 @@
       // commands：自定义档案，字符串或对象。排在分组前面，因此可以写一条更严的档案压住内置档案。
       //   对象字段：argv（前缀，必填）、roles（位置参数角色：pattern / paths / script，缺省 ["paths"]）、
       //   script（script 角色必须整体命中的正则集）、optionPolicy（deny-list 缺省 / allow-list）、
-      //   safeOptions、unsafeOptions、onlyWithinRoots（true = 要求目标全部落在项目根内）、reason。
+      //   safeOptions、unsafeOptions、nonFileValueOptions（取值不是文件的选项，如 find 的 -name/-type：
+      //   不产出路径目标、不占角色槽）、onlyWithinRoots（true = 要求目标全部落在项目根内）、reason。
       //   示例（sed 只放行 `-n 'N,Mp' <file>` 形态；注意模式写松就会失去保护）：
       //   { "argv": ["sed"], "roles": ["script", "paths"],
       //     "script": ["^[0-9]+(,[0-9]+)?p$", "^[0-9]+(,[0-9]+)?d$"],

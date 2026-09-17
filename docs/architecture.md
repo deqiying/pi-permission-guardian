@@ -523,6 +523,7 @@ argv（可执行名 + 参数）
 - **档案是数据，判定是纯函数**：内置分组的数据在 `config/readonly.ts`（配置层），匹配与判定在 `facts/bash/readonly-commands.ts`（事实层）。配置层把“分组 + 用户条目 + 旧字符串条目”展开成一个有序列表交给事实层，事实层不读配置。
 - **顺序就是优先级**：用户条目排在最前，因此“写一条更严的 `rg` 档案”是压制内置档案的正规做法；旧字符串白名单排最后，只作兜底。
 - **组件分离的原因**：`argv.ts` 负责把语法树节点摊成 token（选项 / 位置参数 / `--opt=value` 的取值 / 动态标记），`readonly-commands.ts` 只做档案比对，`path-tokens.ts` 按角色归因路径。把“哪些词是路径”从“像不像路径”变成“档案怎么说”，是本次优化的核心。
+- **角色分配只有一处实现**：`planPositionalRoles`（`readonly-commands.ts`）按源码顺序给位置参数编号，跳过档案前缀消耗的词与"取值不是文件"的选项取值（`nonFileValueOptions`）。判定（`script` 角色）与路径归因（`path-tokens.ts` 的 `profiledAnalysis`）都调用它，避免两处口径漂移；`ReadOnlyPlan.valueTokenIndexes` 把"哪个 token 是某个选项的取值"这一结论在两处之间传递。
 - **降级方向恒定**：任何看不懂的形态（选项名动态、脚本不匹配、路径位置取值不可知、透明前缀布局看不透）都只是取消免评审或升级为不可信，不会放宽成放行；没有命中档案的命令行为与旧实现逐字一致（D29）。
 - **内推发生在参数分析之前**：透明前缀（FR-12 修订）由 `enumerate.ts` 在调用 `analyzeCommandArgs` 之前解析掉，因此档案匹配、路径角色、选项名单看到的都是**内层命令**的 argv；事实层只往里传一个 `startArgument` 下标，切片与空词对齐在 `argv.ts` 里统一处理。
 - **`onlyWithinRoots`**：档案可以要求“目标落在项目根内”才免评审（`cd` / `pushd` 用它：进项目目录是只读操作，出到外部不是）。它需要路径目标，因此判定与取消原因（`outside-roots` / `no-path-target`）都由事实层在 `isReadOnlyUnit` / `readOnlyCancelFor` 里给，而不是只靠 argv。

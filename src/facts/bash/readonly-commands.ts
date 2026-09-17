@@ -33,6 +33,13 @@ export interface ReadOnlyPlan {
   /** 未声明安全的带值选项里"值像路径"的取值：仍按旧口径产出 read 路径目标。 */
   optionPathValues: readonly string[];
   /**
+   * 属于 `nonFileValueOptions` 的**独立词取值**在 `argv.tokens` 里的下标。
+   *
+   * 这些 token 既不是文件、也不该占掉一个角色槽（`find . -name '*.pem'` 的 `'*.pem'`），
+   * 因此由 `planPositionalRoles` 跳过；`-name=x` 这种粘在同一词里的形式不需要下标。
+   */
+  valueTokenIndexes: ReadonlySet<number>;
+  /**
    * 出现了档案无法核实其含义的动态取值（未声明安全的带值选项、选项名本身动态、脚本取值动态）：
    * 单元必须按 FR-15 升级为不可信对象，交给 `onUnresolvedFacts`。
    *
@@ -166,9 +173,9 @@ export function planReadOnly(
   const roles = entry.roles ?? (["paths"] as const);
   const policy = entry.optionPolicy ?? "deny-list";
   const optionPathValues: string[] = [];
+  const valueTokenIndexes = new Set<number>();
   let cancel: string | undefined;
   let dynamicArg = false;
-  let sawScript = false;
   const setCancel = (value: string): void => {
     cancel ??= value;
   };
@@ -176,18 +183,33 @@ export function planReadOnly(
     dynamicArg = true;
   };
 
-  for (const token of argv.tokens) {
-    if (token.kind === "option") {
-      checkOptionToken(token, entry, policy, optionPathValues, setCancel, markDynamicArg);
+  // 第一遍：选项与它们的取值。“取值不是文件”的选项先把它的独立词取值标掉，
+  // 第二遍分配角色时才不会把模式/数字当成位置参数（`find . -name '*.pem'` 的 `'*.pem'`）。
+  for (let index = 0; index < argv.tokens.length; index += 1) {
+    // 已经被上一个选项吸收为取值（`find . -mtime -7` 的 `-7`）：不再当选项查名单。
+    if (valueTokenIndexes.has(index)) {
       continue;
     }
-    const index = token.positionalIndex ?? 0;
-    const prefixCount = prefixPositionalCount(entry);
-    if (index < prefixCount) {
+    const token = argv.tokens[index] as ArgvToken;
+    if (token.kind !== "option") {
       continue;
     }
-    // 角色序列从**档案前缀之后**开始编号（`git grep` 的 `grep` 占据了序号 0，但它是前缀）。
-    const role = roleAt(roles, index - prefixCount);
+    // 只有"就是这个选项词本身"（`-name x`）才吃掉下一个词；`-A3` / `-n5` 这类取值已粘在同一词里。
+    const nonFile = matchOptionEntry(entry.nonFileValueOptions, optionKey(token.raw));
+    if (
+      nonFile !== undefined &&
+      token.embedded === undefined &&
+      token.raw === nonFile &&
+      index + 1 < argv.tokens.length
+    ) {
+      valueTokenIndexes.add(index + 1);
+    }
+    checkOptionToken(token, entry, policy, optionPathValues, setCancel, markDynamicArg);
+  }
+
+  // 第二遍：位置参数的角色。
+  let sawScript = false;
+  for (const { token, role } of planPositionalRoles(argv, entry, valueTokenIndexes)) {
     if (role === undefined) {
       // `roles: []` 的含义是“不允许位置参数”：`git branch <新分支名>` 会造分支、
       // `node --version x` 属于没见过的形态，都只能按取消处理。
@@ -217,7 +239,7 @@ export function planReadOnly(
     setCancel("script-not-allowed");
   }
 
-  const plan: ReadOnlyPlan = { entry, roles, optionPathValues };
+  const plan: ReadOnlyPlan = { entry, roles, optionPathValues, valueTokenIndexes };
   if (cancel !== undefined) {
     plan.cancel = cancel;
   }
@@ -225,6 +247,45 @@ export function planReadOnly(
     plan.dynamicArg = true;
   }
   return plan;
+}
+
+/** 位置参数及其角色（`role === undefined` 表示没有角色可分配）。 */
+export interface PositionalRole {
+  token: ArgvToken;
+  role: ReadOnlyRole | undefined;
+}
+
+/**
+ * 逐位置参数分配角色（FR-65）。
+ *
+ * 编号规则：按源码顺序计数，**跳过档案前缀消耗的词**（`git grep` 的 `grep`）与
+ * **“取值不是文件”的选项取值**（`find . -name '*.pem'` 的 `'*.pem'`）。
+ * 后者不占角色槽，因此 `rg --glob '*.pem' -n x src` 里的 `x` 仍然是 `pattern`、`src` 是 `paths`。
+ *
+ * 这是角色分配的唯一实现：判定（script 角色）与路径归因共用它，避免两处口径不一。
+ */
+export function planPositionalRoles(
+  argv: Argv,
+  entry: ReadOnlyCommandProfile,
+  valueTokenIndexes: ReadonlySet<number>,
+): PositionalRole[] {
+  const roles = entry.roles ?? (["paths"] as const);
+  const prefixCount = prefixPositionalCount(entry);
+  const result: PositionalRole[] = [];
+  let slot = 0;
+  for (let index = 0; index < argv.tokens.length; index += 1) {
+    const token = argv.tokens[index] as ArgvToken;
+    if (token.kind === "option" || valueTokenIndexes.has(index)) {
+      continue;
+    }
+    const current = slot;
+    slot += 1;
+    if (current < prefixCount) {
+      continue;
+    }
+    result.push({ token, role: roleAt(roles, current - prefixCount) });
+  }
+  return result;
 }
 
 function checkOptionToken(
@@ -258,6 +319,10 @@ function checkOptionToken(
     return;
   }
   if (token.embedded !== undefined) {
+    if (matchOptionEntry(entry.nonFileValueOptions, key) !== undefined) {
+      // 取值不是文件：动态取值也不影响免评审（与 `pattern` 角色同待遇），也不产出路径目标。
+      return;
+    }
     if (token.embedded.dynamic) {
       setCancel(`option-not-allowed:${key}`);
       markDynamicArg();

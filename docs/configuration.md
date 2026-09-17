@@ -342,27 +342,41 @@ v1 只兼容 `@gotgenes/pi-subagents` v21.7.1。绑定握手与子会话 registr
 
 ### 7.3 选项名单
 
+档案对"选项"有三类声明，回答三个不同的问题：
+
+| 声明 | 回答的问题 | 效果 |
+|---|---|---|
+| `unsafeOptions` | 这个选项会**写文件 / 执行程序 / 改工作目录**吗？ | 命中即取消免评审（`unsafe-option:<opt>`） |
+| `safeOptions` | 这个选项键**安全**吗？ | `allow-list` 下只有列出的选项安全；`deny-list` 下它同时豁免"`--opt=<像路径>` 取消"的形状规则 |
+| `nonFileValueOptions` | 这个选项的**取值是文件**吗？ | 取值为"不是文件"（模式、数字、类型名、关键字）时：不产出路径目标、不占位置参数角色槽、不因"取值像路径"取消免评审 |
+
+选项策略（只有 `allow-list` / `deny-list` 两种）：
+
 | 策略 | 含义 | 适用 |
 |---|---|---|
 | `deny-list`（默认） | 未列出的选项默认安全；命中 `unsafeOptions` 即取消 | 选项集合稳定的命令（`rg`、`grep`、`sort`、`cat`） |
 | `allow-list` | **只有** `safeOptions` 列出的选项安全，其余一律取消 | 危险选项密集的命令（`find` 的 `-delete`/`-fprint`/`-exec`、`git branch` 的 `-d`/`-D`/`-m`/`-f`） |
 
-- `unsafeOptions` / `safeOptions` 按**词前缀**匹配：`--pre` 同时覆盖 `--pre=x` 与 `--pre-glob`（宁可多取消）。
-- 未声明安全的带值选项仍受旧形状规则约束：`--output=.env`（值像路径）会取消免评审。
-- `unsafeOptions` 的依据只有两类：**写文件**（`--output`、`sort -o`）与**执行程序**（`rg --pre`、`sort --compress-program`、`git --ext-diff`、`git grep -O`、`git -c`）。后者破坏面更大，也最容易漏。
+要点：
+
+- `unsafeOptions` / `safeOptions` / `nonFileValueOptions` 按**词前缀**匹配：`--pre` 同时覆盖 `--pre=x` 与 `--pre-glob`（宁可多取消）。
+- `unsafeOptions` 的依据只有两类：**写文件**（`--output`、`sort -o`）与**执行程序**（`rg --pre`、`sort --compress-program`、`git --ext-diff`、`git grep -O`、`git -c`）。后者破坏面更大，也最容易漏。取消判定**先于**另外两类声明：同一选项同时列进 `unsafeOptions` 时仍然取消。
+- `nonFileValueOptions` 解决的是"选项取值被当成文件"：`find . -name '*.pem'` 的 `'*.pem'` 是模式，声明后它不再变成读路径（不会撞上你自己的 `*.pem: deny`），`head -n 5 f` 的 `5`、`git blame -L 1,10 f` 的 `1,10` 也不再是幽灵路径。`-opt value` 与 `-opt=value` 两种写法都生效；`-A3` 这类粘写短选项不会被误当成"要吃下一个词"。
+- **只声明取值确定不是文件的选项**：不确定就不声明，保持旧口径（取值像路径时取消免评审）。`find -newer f.txt` 的取值是真文件，因此 `-newer` 不在名单里，读路径照常产出。
+- 有些选项**故意不声明**：`rg -e <pattern>` / `grep -e` / `git grep -e` 的取值会自然地落在 `pattern` 角色槽上，声明反而会把后面的真实路径挤到模式位置。判断规则是"这个取值在角色序列里会不会自然落在正确的位置"。
 - 未声明档案的命令**不看**这些名单，行为与旧实现一致（D29）。
 
 ### 7.4 内置分组
 
 | 分组 | 默认 | 内容与要点 |
 |---|---|---|
-| `search` | 开 | `rg`（`unsafeOptions: --pre / --hostname-bin`，`safeOptions: -g / --glob / --type`）、`grep`、`find`（allow-list） |
+| `search` | 开 | `rg`（`unsafeOptions: --pre / --hostname-bin`，`safeOptions: -g / --glob / --type`）、`grep`、`find`（allow-list；谓词取值声明为 `nonFileValueOptions`） |
 | `nav` | 开 | `cd` / `pushd`，都带 `onlyWithinRoots`：**目标必须落在项目根内**免评审（`cd src` ✓、`cd ..` / `cd /tmp` / `cd ~` 不免）。要求至少一个位置参数且全部目标非 external，因此无参数 `cd`（回家目录）、`cd -`、`popd`（目标是栈顶）都不免 |
-| `text-read` | 开 | `cat` `head` `tail` `wc` `nl` `od` `xxd` `file` `stat` `ls` `realpath` `tree`（`tree -o` 取消免评审） |
+| `text-read` | 开 | `cat` `head` `tail` `wc` `nl` `od` `xxd` `file` `stat` `ls` `realpath` `tree`（`tree -o` 取消免评审；`head -n 5` / `ls -w 80` 的取值不是文件） |
 | `print` | 开 | `echo` / `printf`，角色是 `pattern`：位置参数是**文本而不是文件**，因此不会产出读路径（`echo note.env` 不会撞 `*.env` 规则），写文件仍由重定向层面判定 |
 | `system` | 开 | `date`（`-s`/`--set` 取消）、`du` `df` `lsof`、`which` `type`、`command -v` / `command -V`（查询，不执行参数）、`ps` `uname` `id` `whoami` `uptime` `nproc`、`hostname`（不允许位置参数） |
 | `vcs-read` | 开 | `git status/diff/log/show/ls-files/ls-tree/rev-parse/blame/shortlog/describe/cat-file/for-each-ref/grep`（`unsafeOptions: --output / --ext-diff`，`git grep` 另加 `-O / --ext-grep`）、`git branch`（allow-list：只放行 `--show-current`、`-a`、`-v`、`--list` 等查询形式，且不允许位置参数）、`git remote -v`、`git worktree list`、`git stash list` |
-| `text-tools` | **关** | `sort`（`-o`/`--output`/`--compress-program`/`-T` 取消）、`uniq` `cut` `comm` `cmp` `diff`、`tr`、`jq` |
+| `text-tools` | **关** | `sort`（`-o`/`--output`/`--compress-program`/`-T` 取消）、`cut` `comm` `cmp` `diff` `tr` `jq`。**刻意不含 `uniq`**：`uniq [INPUT [OUTPUT]]` 的第二个位置参数是**输出文件**，而角色模型只能声明读路径，不声明写形态就不放行 |
 | `meta` | **关** | 版本查询：`node --version`、`npm --version`、`python --version`、`tsc --version`、`git --version`、`rg --version` 等（前缀限定到具体旗标，因此裸 `node` **永远**不免评审） |
 
 **明确不进内置分组**：`sed` / `awk` / `perl` / 裸 `node` / 裸 `python`（脚本体或程序体可写可执行）、`tee` / `unzip` / `tar`（写）、网络类命令（`curl` / `wget` / `gh` / `dig`）。判定方式是 argv，不是沙箱；别名、PATH 劫持、以及 `RIPGREP_CONFIG_PATH` 这类工具配置注入的执行点都在它的视野之外。
@@ -448,6 +462,7 @@ pwd, ls, cat, head, tail, wc, git status, git diff, git log, git show
 |---|---|
 | `unsafe-option:--pre` | 命中 `unsafeOptions` |
 | `option-not-allowed:-D` | `allow-list` 下未列出的选项（或带值选项的取值不可静态确定） |
+| `unexpected-arg:HEAD` | 档案声明不允许位置参数（`roles: []`），但出现了位置参数 |
 | `option-path-value:--output` | 未声明安全的 `--opt=<值像路径>` |
 | `script-not-allowed` | `script` 角色未命中模式集（含脚本缺失） |
 | `dynamic-arg` | 选项名或脚本本身不可静态确定 |

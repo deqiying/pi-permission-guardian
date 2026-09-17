@@ -107,6 +107,19 @@ export interface ReadOnlyCommandProfile {
   optionPolicy?: "deny-list" | "allow-list";
   /** allow-list 下视为安全的选项；在 deny-list 下同时豁免“值像路径的 `--opt=value`”。 */
   safeOptions?: readonly string[];
+  /**
+   * 取值**不是文件**的选项（模式、数字、类型名、关键字…），例如 `find` 的 `-name` / `-type` / `-size`。
+   *
+   * `-opt value` 与 `-opt=value` 两种写法都算：声明后该取值
+   * 1) 不产出路径目标（`find . -name '*.pem'` 的 `'*.pem'` 不再当成读路径去撞 `path` 规则）；
+   * 2) 不占位置参数的角色槽（`rg --glob '*.pem' -n x src` 的 `x` 仍然是 `pattern`）；
+   * 3) 不因“取值像路径”取消免评审，动态取值也不升级为不可信（与 `pattern` 角色同待遇）。
+   *
+   * 只声明“取值确定不是文件”的选项：只要不确定就不声明，保持旧口径（fail-closed）。
+   * 本字段**不**授予选项键安全（allow-list 下的命令仍需把该项同时列进 `safeOptions`），
+   * 也不影响 `unsafeOptions`：取消判定始终先跑。
+   */
+  nonFileValueOptions?: readonly string[];
   /** 命中即取消免评审的选项（写文件、执行程序、改工作目录）。按词前缀匹配。 */
   unsafeOptions?: readonly string[];
   /** 档案来源：内置分组名 / `user` / `readOnlyCommands`（旧键展开）。用于审计展示。 */

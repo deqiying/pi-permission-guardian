@@ -418,6 +418,7 @@ test/facts/bash/readonly-profiles.test.ts 端到端行为表（承诺的行为�
 9. 默认分组含 `nav`（`cd` / `pushd` + `onlyWithinRoots`）：进项目内目录免评审，出项目外 / `cd -` / 无参数 / `popd` 不免；`cd -`、无参数 `pushd`、`popd` 的目标不可静态确定，单元升级为 `dynamic-path`。
 10. 默认分组放宽到六组（`search` / `vcs-read` / `nav` / `text-read` / `print` / `system`，D28 修订）：常见组合命令（`rg … && echo done`、`which node && date`）整体免评审；`text-tools` / `meta` 仍默认关闭。
 11. 透明前缀内推（FR-12 修订 / D33）：`timeout` / `nice` / `ionice` / `stdbuf` / `nohup` / `time` / `env` / `command` 在参数分析之前被跳过（最多 3 层），内层命令文本作为规则额外目标；`sudo` / `xargs` / `bash -c` / 动态内层命令仍不透明。
+12. 档案的第三类选项声明 `nonFileValueOptions`（FR-65 / D34）：取值不是文件的选项不产出路径目标、不占角色槽；`planPositionalRoles` 成为角色分配的唯一实现；内置数据补 `find` / `grep` / `rg` / `head` / `tail` / `ls` / git 只读子命令 / `text-tools` 与 `system` 的相关选项；`uniq` 从 `text-tools` 移除。
 7. 可观测：`CommandUnit.readOnlyCancel` → `PolicyObject` → 审计条目 / 判定理由 / `/perm status`。
 8. 文档与需求同步：`docs/requirements.md`（FR-65~FR-70、D21 修订、D28~D32、§8.2 残余面）、`docs/architecture.md`（§5.2/§5.3/§5.4）、`docs/configuration.md` §7、README。
 

@@ -36,11 +36,15 @@ const GIT_UNSAFE_OPTIONS: readonly string[] = ["--output", "--ext-diff"];
 const FIND_SAFE_OPTIONS: readonly string[] = [
   "-name",
   "-iname",
+  "-lname",
+  "-ilname",
   "-path",
   "-ipath",
   "-regex",
   "-iregex",
   "-type",
+  "-xtype",
+  "-fstype",
   "-maxdepth",
   "-mindepth",
   "-not",
@@ -55,6 +59,9 @@ const FIND_SAFE_OPTIONS: readonly string[] = [
   "-mtime",
   "-atime",
   "-ctime",
+  "-mmin",
+  "-amin",
+  "-cmin",
   "-size",
   "-perm",
   "-user",
@@ -73,6 +80,289 @@ const FIND_SAFE_OPTIONS: readonly string[] = [
   "-H",
 ];
 
+/**
+ * `find` 的“取值不是文件”选项（FR-65 的 `nonFileValueOptions`）：谓词、数值、类型名。
+ *
+ * 刻意**不含**以下三类：
+ * - `-newer` / `-newermt` / `-samefile`：取值是真文件（必须继续产出读路径）；
+ * - `-fprint` / `-fprintf`：取值是文件，且不在 allow-list 里（命中即取消）；
+ * - `-exec` 一类：取值是程序（同样不在 allow-list 里）。
+ */
+const FIND_NON_FILE_VALUE_OPTIONS: readonly string[] = [
+  "-name",
+  "-iname",
+  "-lname",
+  "-ilname",
+  "-path",
+  "-ipath",
+  "-regex",
+  "-iregex",
+  "-type",
+  "-xtype",
+  "-fstype",
+  "-size",
+  "-mtime",
+  "-atime",
+  "-ctime",
+  "-mmin",
+  "-amin",
+  "-cmin",
+  "-perm",
+  "-user",
+  "-group",
+  "-links",
+  "-inum",
+  "-maxdepth",
+  "-mindepth",
+  "-printf",
+];
+
+/** `grep` 的取值选项：模式、数值、关键字。刻意不含 `-f FILE` 与 `--exclude-from=FILE`（取值是文件）。 */
+const GREP_NON_FILE_VALUE_OPTIONS: readonly string[] = [
+  "--include",
+  "-include",
+  "--exclude",
+  "--exclude-dir",
+  "-A",
+  "-B",
+  "-C",
+  "-m",
+  "--max-count",
+  "--binary-files",
+  "-D",
+  "--devices",
+  "-d",
+  "--directories",
+  "--color",
+  "--colour",
+];
+
+/** `rg` 的取值选项：模式、数值、关键字。`--pre` / `--hostname-bin` 是程序（在 unsafeOptions 里）。 */
+const RG_NON_FILE_VALUE_OPTIONS: readonly string[] = [
+  "-g",
+  "--glob",
+  "--iglob",
+  "-t",
+  "--type",
+  "-T",
+  "--type-not",
+  "-A",
+  "-B",
+  "-C",
+  "--context",
+  "-m",
+  "--max-count",
+  "--max-columns",
+  "--max-depth",
+  "--max-filesize",
+  "--threads",
+  "-j",
+  "--color",
+  "--colors",
+  "--encoding",
+  "--engine",
+  "--sort",
+  "--replace",
+  "-r",
+  "--path-separator",
+  "--field-context-separator",
+  "--field-match-separator",
+  "--context-separator",
+];
+
+/** `head` / `tail` 的取值选项：数值与间隔。 */
+const HEAD_TAIL_NON_FILE_VALUE_OPTIONS: readonly string[] = [
+  "-n",
+  "--lines",
+  "-c",
+  "--bytes",
+  "-s",
+  "--sleep-interval",
+  "--pid",
+  "--max-unchanged-stats",
+];
+
+/** `ls` 的取值选项：宽度、排序键、时间格式、颜色等（`-w 80` 的 `80` 不该成为读路径）。 */
+const LS_NON_FILE_VALUE_OPTIONS: readonly string[] = [
+  "-w",
+  "--width",
+  "-I",
+  "--ignore",
+  "--time-style",
+  "--block-size",
+  "--format",
+  "--color",
+  "--colour",
+  "--sort",
+  "--quoting-style",
+  "--hide",
+  "--indicator-style",
+  "--tabsize",
+  "--hyperlink",
+];
+
+/**
+ * `git` 只读子命令的取值选项：数字、格式、过滤关键字、ref。
+ *
+ * 刻意不含 `--output`（写文件，在 unsafeOptions）与 `--file` / `--pathspec-from-file`（取值是文件）。
+ */
+const GIT_NON_FILE_VALUE_OPTIONS: readonly string[] = [
+  "-n",
+  "--max-count",
+  "--skip",
+  "-L",
+  "-S",
+  "-G",
+  "--format",
+  "--pretty",
+  "--date",
+  "--diff-filter",
+  "--author",
+  "--committer",
+  "--grep",
+  "--grep-reflog",
+  "--abbrev",
+  "--unified",
+  "-U",
+  "--since",
+  "--until",
+  "--sort",
+  "--points-at",
+  "--contains",
+  "--no-contains",
+  "--merged",
+  "--no-merged",
+  "--max-depth",
+  "--exclude",
+  "--column",
+];
+
+/**
+ * `git grep` 另外需要的取值选项（上下文行数、并行度）。
+ *
+ * 刻意**不含** `-e` / `--regexp`：它的取值会自然地落在 `pattern` 角色槽上，
+ * 声明反而会把后面的真实路径挤到 `pattern` 槽（`git grep -e x -- src` 的 `src` 会失去路径目标）。
+ */
+const GIT_GREP_NON_FILE_VALUE_OPTIONS: readonly string[] = [
+  ...GIT_NON_FILE_VALUE_OPTIONS,
+  "-A",
+  "-B",
+  "-C",
+  "-m",
+  "--max-count",
+  "--threads",
+  "-j",
+];
+
+/** `git branch` 的取值选项：ref 与排序键（`--contains HEAD` 的 `HEAD` 不是位置参数）。 */
+const GIT_BRANCH_NON_FILE_VALUE_OPTIONS: readonly string[] = [
+  "--show-current",
+  "--list",
+  "--contains",
+  "--no-contains",
+  "--merged",
+  "--no-merged",
+  "--sort",
+  "--points-at",
+  "--format",
+  "--column",
+];
+
+/** `sort` 的取值选项：键、分隔符、缓冲区、并行度。`-o` / `--compress-program` 在 unsafeOptions 里。 */
+const SORT_NON_FILE_VALUE_OPTIONS: readonly string[] = [
+  "-k",
+  "--key",
+  "-t",
+  "--field-separator",
+  "-S",
+  "--buffer-size",
+  "--batch-size",
+  "--parallel",
+  "--sort",
+  "--debug",
+];
+
+/** `cut` 的取值选项：分隔符与字段/字节范围。 */
+const CUT_NON_FILE_VALUE_OPTIONS: readonly string[] = [
+  "-d",
+  "--delimiter",
+  "-f",
+  "--fields",
+  "-c",
+  "--characters",
+  "-b",
+  "--bytes",
+  "--output-delimiter",
+  "--complement",
+];
+
+/** `cmp` 的数值选项（`cmp` 本身在 text-tools 里；`uniq` 因第二个位置参数是输出文件而不列入）。 */
+const CMP_NON_FILE_VALUE_OPTIONS: readonly string[] = [
+  "-i",
+  "--ignore-initial",
+  "-n",
+  "--bytes",
+];
+
+/** `diff` 的取值选项：上下文行数、标签、宽度。`--ed` 一类输出到 stdout，不涉文件。 */
+const DIFF_NON_FILE_VALUE_OPTIONS: readonly string[] = [
+  "-U",
+  "--unified",
+  "--label",
+  "-I",
+  "--ignore-matching-lines",
+  "--tabsize",
+  "--horizon-lines",
+  "--width",
+  "-W",
+];
+
+/** `comm` 的取值选项。 */
+const COMM_NON_FILE_VALUE_OPTIONS: readonly string[] = [
+  "--output-delimiter",
+  "--check-order",
+  "--nocheck-order",
+];
+
+/** `du` / `df` 的取值选项：深度、块大小、类型。 */
+const DU_DF_NON_FILE_VALUE_OPTIONS: readonly string[] = [
+  "-d",
+  "--max-depth",
+  "-B",
+  "--block-size",
+  "--exclude",
+  "--time",
+  "--time-style",
+  "-t",
+  "--type",
+  "-x",
+  "--exclude-type",
+  "--output",
+];
+
+/** `lsof` / `ps` 的取值选项：PID、用户、格式、过滤。 */
+const LSOF_NON_FILE_VALUE_OPTIONS: readonly string[] = [
+  "-p",
+  "-i",
+  "-c",
+  "-u",
+  "-g",
+  "-s",
+  "-w",
+];
+const PS_NON_FILE_VALUE_OPTIONS: readonly string[] = [
+  "-o",
+  "--format",
+  "-p",
+  "--pid",
+  "-t",
+  "-C",
+  "-u",
+  "-U",
+  "-G",
+  "--sort",
+];
+
 /** 内置分组：名字是配置面的取值（`workingDirectory.readOnly.profiles`）。 */
 const GROUP_PROFILES: Readonly<Record<ReadOnlyProfileGroup, readonly ReadOnlyCommandProfile[]>> = {
   // 搜索类：位置参数是“模式 + 路径”，模式不是文件（FR-65 的角色模型就是为它引入的）。
@@ -83,13 +373,15 @@ const GROUP_PROFILES: Readonly<Record<ReadOnlyProfileGroup, readonly ReadOnlyCom
       group: "search",
       unsafeOptions: ["--pre", "--hostname-bin"],
       safeOptions: ["-g", "--glob", "--iglob", "-t", "--type", "-T", "--type-not"],
+      nonFileValueOptions: [...RG_NON_FILE_VALUE_OPTIONS],
       reason:
-        "rg 默认只搜不写；--pre 实测会 spawn 任意程序（每个被搜文件一次）、--hostname-bin 同为选项即程序。--glob/--type 的取值是模式而不是文件，因此豁免形状规则。",
+        "rg 默认只搜不写；--pre 实测会 spawn 任意程序（每个被搜文件一次）、--hostname-bin 同为选项即程序。--glob/--type 的取值是模式而不是文件，因此豁免形状规则也不占角色槽。",
     },
     {
       argv: ["grep"],
       roles: ["pattern", "paths"],
       group: "search",
+      nonFileValueOptions: [...GREP_NON_FILE_VALUE_OPTIONS],
       reason: "grep 只读；GNU grep 实测没有执行类选项（执行类选项在 git grep 上）。",
     },
     {
@@ -97,9 +389,10 @@ const GROUP_PROFILES: Readonly<Record<ReadOnlyProfileGroup, readonly ReadOnlyCom
       roles: ["paths"],
       optionPolicy: "allow-list",
       safeOptions: [...FIND_SAFE_OPTIONS],
+      nonFileValueOptions: [...FIND_NON_FILE_VALUE_OPTIONS],
       group: "search",
       reason:
-        "find 的危险选项密集（-delete / -fprint / -fprintf / -exec），因此只放行显式列出的只读谓词。",
+        "find 的危险选项密集（-delete / -fprint / -fprintf / -exec），因此只放行显式列出的只读谓词。谓词的取值是模式/数值而不是文件（`-name '*.pem'` 不该产出读路径）。",
     },
   ],
 
@@ -111,7 +404,8 @@ const GROUP_PROFILES: Readonly<Record<ReadOnlyProfileGroup, readonly ReadOnlyCom
         roles: ["paths"],
         group: "vcs-read",
         unsafeOptions: [...GIT_UNSAFE_OPTIONS],
-        reason: `git ${subcommand} 是只读子命令；--output 会写文件，--ext-diff 会执行外部 diff 助手。`,
+        nonFileValueOptions: [...GIT_NON_FILE_VALUE_OPTIONS],
+        reason: `git ${subcommand} 是只读子命令；--output 会写文件，--ext-diff 会执行外部 diff 助手。数值/格式类取值（\`-n 5\`、\`-L 1,10\`）不占角色槽。`,
       }),
     ),
     {
@@ -119,6 +413,7 @@ const GROUP_PROFILES: Readonly<Record<ReadOnlyProfileGroup, readonly ReadOnlyCom
       roles: ["pattern", "paths"],
       group: "vcs-read",
       unsafeOptions: [...GIT_UNSAFE_OPTIONS, "-O", "--ext-grep"],
+      nonFileValueOptions: [...GIT_GREP_NON_FILE_VALUE_OPTIONS],
       reason: "git grep 只读；-O 打开 pager、--ext-grep 会调用外部 grep（均为选项即程序）。",
     },
     {
@@ -126,10 +421,11 @@ const GROUP_PROFILES: Readonly<Record<ReadOnlyProfileGroup, readonly ReadOnlyCom
       roles: [],
       optionPolicy: "allow-list",
       safeOptions: ["--show-current", "-a", "--all", "-v", "--verbose", "--list", "--contains", "--merged", "--no-merged", "-r", "--remotes"],
+      nonFileValueOptions: [...GIT_BRANCH_NON_FILE_VALUE_OPTIONS],
       group: "vcs-read",
       unsafeOptions: [...GIT_UNSAFE_OPTIONS],
       reason:
-        "git branch 的写形态是位置参数（<新分支名>）与 -d/-D/-m/-M/-f，因此只放行显式列出的查询选项、且不允许位置参数。",
+        "git branch 的写形态是位置参数（<新分支名>）与 -d/-D/-m/-M/-f，因此只放行显式列出的查询选项、且不允许位置参数（--contains <ref> 的 ref 因此被声明为取值）。",
     },
     {
       argv: ["git", "remote", "-v"],
@@ -156,7 +452,7 @@ const GROUP_PROFILES: Readonly<Record<ReadOnlyProfileGroup, readonly ReadOnlyCom
 
   // 文本读取：全部位置参数都是路径（旧白名单的口径，行为不变）。
   "text-read": [
-    ...["cat", "head", "tail", "wc", "nl", "od", "xxd", "file", "stat", "ls", "realpath"].map(
+    ...["cat", "wc", "nl", "od", "xxd", "file", "stat", "realpath"].map(
       (command): ReadOnlyCommandProfile => ({
         argv: [command],
         roles: ["paths"],
@@ -164,6 +460,27 @@ const GROUP_PROFILES: Readonly<Record<ReadOnlyProfileGroup, readonly ReadOnlyCom
         reason: `${command} 只读。`,
       }),
     ),
+    {
+      argv: ["head"],
+      roles: ["paths"],
+      group: "text-read",
+      nonFileValueOptions: [...HEAD_TAIL_NON_FILE_VALUE_OPTIONS],
+      reason: "head 只读；`-n 5` 的 5 是数字而不是文件（不产出读路径、不占角色槽）。",
+    },
+    {
+      argv: ["tail"],
+      roles: ["paths"],
+      group: "text-read",
+      nonFileValueOptions: [...HEAD_TAIL_NON_FILE_VALUE_OPTIONS],
+      reason: "tail 只读；`-n 5` 的 5 是数字而不是文件。",
+    },
+    {
+      argv: ["ls"],
+      roles: ["paths"],
+      group: "text-read",
+      nonFileValueOptions: [...LS_NON_FILE_VALUE_OPTIONS],
+      reason: "ls 只读；`-w 80` / `--time-style long-iso` 的取值不是文件。",
+    },
     {
       argv: ["tree"],
       roles: ["paths"],
@@ -180,28 +497,54 @@ const GROUP_PROFILES: Readonly<Record<ReadOnlyProfileGroup, readonly ReadOnlyCom
       roles: ["paths"],
       group: "text-tools",
       unsafeOptions: ["-o", "--output", "--compress-program", "-T", "--temporary-directory"],
+      nonFileValueOptions: [...SORT_NON_FILE_VALUE_OPTIONS],
       reason:
-        "sort 只读；-o/--output 写文件，--compress-program 实测会执行传入的程序，-T 会在指定目录写临时文件。",
+        "sort 只读；-o/--output 写文件，--compress-program 实测会执行传入的程序，-T 会在指定目录写临时文件。`-k 2` 的取值不是文件。",
     },
-    ...["uniq", "cut", "comm", "cmp", "diff"].map(
-      (command): ReadOnlyCommandProfile => ({
-        argv: [command],
-        roles: ["paths"],
-        group: "text-tools",
-        reason: `${command} 只读（diff 实测没有 -o/--output）。`,
-      }),
-    ),
+    // `uniq` **刻意不列**：`uniq [INPUT [OUTPUT]]` 的第二个位置参数是**输出文件**，
+    // 而角色模型只能声明读路径（不声明写形态就不放行）——`sort -o` 同理已在 unsafeOptions 里。
+    {
+      argv: ["cut"],
+      roles: ["paths"],
+      group: "text-tools",
+      nonFileValueOptions: [...CUT_NON_FILE_VALUE_OPTIONS],
+      reason: "cut 只输出到 stdout；`-d :` / `-f 1,2` 的取值不是文件。",
+    },
+    {
+      argv: ["comm"],
+      roles: ["paths"],
+      group: "text-tools",
+      nonFileValueOptions: [...COMM_NON_FILE_VALUE_OPTIONS],
+      reason: "comm 只比较两个文件并输出到 stdout。",
+    },
+    {
+      argv: ["cmp"],
+      // `cmp FILE1 [FILE2 [SKIP1 [SKIP2]]]`：后面的跳过字节数是数字，不是文件。
+      roles: ["paths", "paths", "pattern"],
+      group: "text-tools",
+      nonFileValueOptions: [...CMP_NON_FILE_VALUE_OPTIONS],
+      reason: "cmp 只比较并输出到 stdout；第 3/4 个位置参数是跳过字节数。",
+    },
+    {
+      argv: ["diff"],
+      roles: ["paths"],
+      group: "text-tools",
+      nonFileValueOptions: [...DIFF_NON_FILE_VALUE_OPTIONS],
+      reason: "diff 只读（实测没有 -o/--output，--ed 一类也只写 stdout）；`-U 3` 的取值不是文件。",
+    },
     {
       argv: ["tr"],
-      roles: ["pattern", "paths"],
+      roles: ["pattern"],
       group: "text-tools",
-      reason: "tr 的位置参数是字符集而不是路径。",
+      reason: "tr 的两个位置参数都是字符集而不是路径（两个都是 pattern，不产出读目标）。",
     },
     {
       argv: ["jq"],
       roles: ["pattern", "paths"],
       group: "text-tools",
-      reason: "jq 只读：过滤器不是路径，输出只到 stdout（写文件要靠 shell 重定向，已由重定向层覆盖）。",
+      nonFileValueOptions: ["--indent"],
+      reason:
+        "jq 只读：过滤器不是路径，输出只到 stdout（写文件要靠 shell 重定向，已由重定向层覆盖）。注意 --arg/--slurpfile 这类多取值选项未声明（只会让角色错位、多产出幽灵目标，不会放宽）。",
     },
   ],
 
@@ -284,19 +627,22 @@ const GROUP_PROFILES: Readonly<Record<ReadOnlyProfileGroup, readonly ReadOnlyCom
       argv: ["du"],
       roles: ["paths"],
       group: "system",
-      reason: "du 只统计占用。",
+      nonFileValueOptions: [...DU_DF_NON_FILE_VALUE_OPTIONS],
+      reason: "du 只统计占用；`-d 1` / `--exclude '*.log'` 的取值不是文件。",
     },
     {
       argv: ["df"],
       roles: ["paths"],
       group: "system",
-      reason: "df 只统计文件系统容量。",
+      nonFileValueOptions: [...DU_DF_NON_FILE_VALUE_OPTIONS],
+      reason: "df 只统计文件系统容量；`-t ext4` / `-B 1M` 的取值不是文件。",
     },
     {
       argv: ["lsof"],
       roles: ["paths"],
       group: "system",
-      reason: "lsof 只列出打开的文件。",
+      nonFileValueOptions: [...LSOF_NON_FILE_VALUE_OPTIONS],
+      reason: "lsof 只列出打开的文件；`-p 1234` / `-c name` 的取值不是文件。",
     },
     {
       argv: ["which"],
@@ -341,7 +687,8 @@ const GROUP_PROFILES: Readonly<Record<ReadOnlyProfileGroup, readonly ReadOnlyCom
       argv: ["ps"],
       roles: ["pattern"],
       group: "system",
-      reason: "ps 的 BSD 风格参数（`ps aux`）不是路径。",
+      nonFileValueOptions: [...PS_NON_FILE_VALUE_OPTIONS],
+      reason: "ps 的 BSD 风格参数（`ps aux`）不是路径；`-o pid,cmd` / `-p 1234` 的取值也不是文件。",
     },
     ...["uname", "id", "whoami", "uptime", "nproc"].map(
       (command): ReadOnlyCommandProfile => ({

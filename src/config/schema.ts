@@ -378,6 +378,10 @@ const readOnlyCommandEntrySchema = z.union([
         description:
           '命中即取消免评审的选项（写文件 / 执行程序 / 改工作目录）。按词前缀匹配（--pre 同时覆盖 --pre-glob）。',
       }),
+      nonFileValueOptions: z.array(z.string().min(1)).optional().meta({
+        description:
+          '取值不是文件的选项（模式、数字、类型名、关键字），如 find 的 -name / -type / -size。声明后 `-opt value` 与 `-opt=value` 两种写法的取值都不产出路径目标、不占位置参数的角色槽、不因“取值像路径”取消免评审。只声明确定不是文件的选项；本字段不授予选项键安全。',
+      }),
       onlyWithinRoots: z.boolean().optional().meta({
         description:
           '免评审要求目标必须在项目根目录内（缺省 false）。用于 cd / pushd 这类“去哪里”的命令：必须在至少一个位置参数，且全部路径目标都非 external，否则不免评审。',

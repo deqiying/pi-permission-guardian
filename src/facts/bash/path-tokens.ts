@@ -5,9 +5,8 @@ import type { Direction, PathTarget, ReadOnlyCommandProfile } from "../types.ts"
 import { buildArgv, type Argv } from "./argv.ts";
 import {
   legacyProfiles,
+  planPositionalRoles,
   planReadOnly,
-  prefixPositionalCount,
-  roleAt,
   type ReadOnlyPlan,
 } from "./readonly-commands.ts";
 
@@ -126,21 +125,16 @@ function profiledAnalysis(
   plan: ReadOnlyPlan,
   options: CommandArgOptions,
 ): CommandArgAnalysis {
-  // 档案前缀自身消耗的位置参数（`git status` 的 `status`）不是文件路径。
-  const prefixPositionals = prefixPositionalCount(plan.entry);
   const paths: PathTarget[] = [];
   // 档案自己报出的“看不透”的动态取值（未声明安全的带值选项、动态选项名）也要升级为不可信。
   let dynamic = plan.dynamicArg === true;
-  for (const token of argv.tokens) {
-    if (token.kind === "option") {
-      continue;
-    }
-    const index = token.positionalIndex ?? 0;
-    if (index < prefixPositionals) {
-      continue;
-    }
-    // 角色序列从**档案前缀之后**开始编号（`git grep` 的 `grep` 是前缀的一部份，不是序号 0 的角色）。
-    if (roleAt(plan.roles, index - prefixPositionals) !== "paths") {
+  // 角色分配与判定共用同一实现（FR-65）：已跳过档案前缀与“取值不是文件”的选项取值。
+  for (const { token, role } of planPositionalRoles(
+    argv,
+    plan.entry,
+    plan.valueTokenIndexes,
+  )) {
+    if (role !== "paths") {
       continue;
     }
     dynamic = dynamic || token.dynamic;

@@ -112,7 +112,17 @@ const DEFAULTS: Array<[string, Expectation]> = [
   ['cat "$FILE"', { action: "review", units: [{ readOnly: false }], paths: ["read:$FILE"] }],
   // 旧白名单条目（字符串形态）语义不变。
   ["pwd", { action: "allow", units: [{ readOnly: true }] }],
-  ["head -n 5 src/index.ts", { action: "allow", units: [{ readOnly: true }] }],
+  // `nonFileValueOptions`：选项取值不是文件时不占角色槽、也不产出路径目标（FR-65）。
+  ["head -n 5 src/index.ts", { action: "allow", units: [{ readOnly: true }], paths: ["read:/proj/app/src/index.ts"] }],
+  ["tail -c 100 src/index.ts", { action: "allow", units: [{ readOnly: true }], paths: ["read:/proj/app/src/index.ts"] }],
+  ["ls -w 80 src", { action: "allow", units: [{ readOnly: true }], paths: ["read:/proj/app/src"] }],
+  ["find src -name '*.ts' -maxdepth 2", { action: "allow", units: [{ readOnly: true }], paths: ["read:/proj/app/src"] }],
+  ["find . -type f", { action: "allow", units: [{ readOnly: true }], paths: ["read:/proj/app"] }],
+  ["grep -A 3 -n pattern src", { action: "allow", units: [{ readOnly: true }], paths: ["read:/proj/app/src"] }],
+  ["git log -n 5", { action: "allow", units: [{ readOnly: true }] }],
+  ["git blame -L 1,10 src/index.ts", { action: "allow", units: [{ readOnly: true }], paths: ["read:/proj/app/src/index.ts"] }],
+  // `--contains` 的 ref 是取值而不是位置参数，所以 `git branch` 仍然免评审。
+  ["git branch --contains HEAD", { action: "allow", units: [{ readOnly: true }] }],
 ];
 
 describe("只读免评审：默认配置（search + vcs-read）", () => {
@@ -134,6 +144,85 @@ describe("只读免评审：默认配置（search + vcs-read）", () => {
         expected.paths,
       );
     }
+  });
+});
+
+describe("nonFileValueOptions：选项取值不是文件（FR-65，回归自 `find -name '*.pem'`）", () => {
+  it("谓词取值不再成为读路径：`find . -name '*.pem'` 不再撞上用户的 `*.pem: deny`", async () => {
+    const config = resolveConfig({ global: { permission: { path: { "*.pem": "deny" } } } });
+    const table = compileRuleTable(config, GLOB);
+    const facts = await extractFacts("bash", { command: "find . -name '*.pem'" }, contextFor(config));
+
+    // 只有搜索根 `.` 是路径目标；`'*.pem'` 是 `-name` 的取值（模式），不是文件。
+    expect(facts.paths.map((path) => `${path.direction}:${path.lexical}`)).toEqual([
+      "read:/proj/app",
+    ]);
+    expect(facts.commands[0]?.readOnly).toBe(true);
+    expect(evaluateCall({ facts, toolName: "bash", config, table }).action).toBe("allow");
+  });
+
+  it("动态的谓词取值不影响免评审（模式是数据而不是路径）", async () => {
+    const config = resolveConfig();
+    const facts = await extractFacts("bash", { command: 'find . -name "$PAT"' }, contextFor(config));
+    expect(facts.commands[0]?.unresolved).toBeUndefined();
+    expect(facts.commands[0]?.readOnly).toBe(true);
+  });
+
+  it("取值确实是文件的选项不受影响（`-newer f.txt` 仍产出读路径）", async () => {
+    const config = resolveConfig();
+    const facts = await extractFacts("bash", { command: "find . -newer src/index.ts" }, contextFor(config));
+    expect(facts.paths.map((path) => `${path.direction}:${path.lexical}`)).toEqual([
+      "read:/proj/app",
+      "read:/proj/app/src/index.ts",
+    ]);
+  });
+
+  it("危险谓词仍然取消免评审（`-delete` / `-fprint` / `-exec`）", async () => {
+    const config = resolveConfig();
+    const cases: Array<[string, string, "cancel" | "unresolved"]> = [
+      ["find . -name x -delete", "option-not-allowed:-delete", "cancel"],
+      ["find . -fprint out.txt", "option-not-allowed:-fprint", "cancel"],
+      // `-exec` 同时命中 allow-list 之外与包装器两条路径：取消原因写在 cancel，包装器写在 unresolved。
+      ["find . -exec rm {} ;", "indirection-wrapper", "unresolved"],
+    ];
+    for (const [command, expected, kind] of cases) {
+      const facts = await extractFacts("bash", { command }, contextFor(config));
+      const unit = facts.commands[0];
+      expect(unit?.readOnly, command).toBe(false);
+      const actual = kind === "cancel" ? unit?.readOnlyCancel : unit?.unresolved;
+      expect(actual, command).toBe(expected);
+    }
+
+    // `-exec` 时 cancel 也会被记下（两条证据都存在，便于审计）。
+    const exec = await extractFacts("bash", { command: "find . -exec rm {} ;" }, contextFor(config));
+    expect(exec.commands[0]?.readOnlyCancel).toBe("option-not-allowed:-exec");
+  });
+
+  it("text-tools 分组的声明（显式开启后）：数字取值不再成为路径", async () => {
+    const config = resolveConfig({
+      global: {
+        workingDirectory: {
+          readOnly: { profiles: ["search", "vcs-read", "nav", "text-read", "print", "system", "text-tools"] },
+        },
+      },
+    });
+    const cases: Array<[string, string[]]> = [
+      ["sort -k 2 src/index.ts", ["read:/proj/app/src/index.ts"]],
+      ["diff -U 3 a.txt b.txt", ["read:/proj/app/a.txt", "read:/proj/app/b.txt"]],
+      ["cmp a.txt b.txt 10 20", ["read:/proj/app/a.txt", "read:/proj/app/b.txt"]],
+      ["tr a-z A-Z", []],
+    ];
+    for (const [command, expected] of cases) {
+      const facts = await extractFacts("bash", { command }, contextFor(config));
+      expect(facts.paths.map((path) => `${path.direction}:${path.lexical}`), command).toEqual(
+        expected,
+      );
+      expect(facts.commands[0]?.readOnly, command).toBe(true);
+    }
+
+    // `uniq [INPUT [OUTPUT]]` 的第二个位置参数是**输出文件**，因此刻意不在分组里。
+    const uniq = await extractFacts("bash", { command: "uniq in.txt out.txt" }, contextFor(config));
+    expect(uniq.commands[0]?.readOnly).toBe(false);
   });
 });
 

@@ -6,6 +6,7 @@ import {
   isReadOnlyUnit,
   legacyProfiles,
   matchesProfilePrefix,
+  planPositionalRoles,
   planReadOnly,
   prefixPositionalCount,
   roleAt,
@@ -231,6 +232,88 @@ describe("planReadOnly：角色 + 选项名单 + 脚本白名单", () => {
       profile({ unsafeOptions: ["--pre"] }),
     ]);
     expect(plan?.cancel).toBe("unsafe-option:--pre");
+  });
+});
+
+describe("planReadOnly：`nonFileValueOptions`（取值不是文件，FR-65）", () => {
+  const findProfile = (): ReadOnlyCommandProfile =>
+    profile({
+      argv: ["find"],
+      roles: ["paths"],
+      optionPolicy: "allow-list",
+      safeOptions: ["-name", "-type", "-mtime", "-maxdepth"],
+      nonFileValueOptions: ["-name", "-type", "-mtime", "-maxdepth"],
+    });
+
+  it("取值不是文件时不取消免评审（`-name '*.pem'`、`-type f`）", () => {
+    expect(
+      planReadOnly(argvOf("find", ".", "-name", "*.pem"), [findProfile()])?.cancel,
+    ).toBeUndefined();
+    expect(planReadOnly(argvOf("find", ".", "-type", "f"), [findProfile()])?.cancel).toBeUndefined();
+  });
+
+  it("取值的下标被标进 valueTokenIndexes，且不占角色槽", () => {
+    const entry = findProfile();
+    const argv = argvOf("find", ".", "-name", "*.pem", "-maxdepth", "2");
+    const plan = planReadOnly(argv, [entry]);
+    // tokens: [., -name, *.pem, -maxdepth, 2] → 两个取值在 2 与 4。
+    expect([...(plan?.valueTokenIndexes ?? new Set<number>())].sort()).toEqual([2, 4]);
+    expect(planPositionalRoles(argv, entry, plan?.valueTokenIndexes ?? new Set())).toEqual([
+      { token: expect.objectContaining({ text: "." }), role: "paths" },
+    ]);
+  });
+
+  it("`-opt=value` 形式同样不产出路径目标、也不取消", () => {
+    const plan = planReadOnly(argvOf("find", ".", "-name=*.pem"), [findProfile()]);
+    expect(plan?.cancel).toBeUndefined();
+    expect(plan?.optionPathValues).toEqual([]);
+  });
+
+  it("前导 `-` 的取值不会被当成选项（`-mtime -7`）", () => {
+    const argv = argvOf("find", ".", "-mtime", "-7");
+    const plan = planReadOnly(argv, [findProfile()]);
+    expect(plan?.cancel).toBeUndefined();
+    // tokens: [., -mtime, -7] → 取值下标是 2（`-7` 以 `-` 开头，但它是上一个选项的取值）。
+    expect([...(plan?.valueTokenIndexes ?? new Set<number>())]).toEqual([2]);
+  });
+
+  it("短选项粘写（`-A3`）不吞下一个词", () => {
+    const grepProfile = profile({
+      argv: ["grep"],
+      roles: ["pattern", "paths"],
+      nonFileValueOptions: ["-A"],
+    });
+    const argv = argvOf("grep", "-A3", "x", "src");
+    const plan = planReadOnly(argv, [grepProfile]);
+    expect(plan?.cancel).toBeUndefined();
+    expect([...(plan?.valueTokenIndexes ?? new Set<number>())]).toEqual([]);
+    expect(planPositionalRoles(argv, grepProfile, plan?.valueTokenIndexes ?? new Set())).toEqual([
+      { token: expect.objectContaining({ text: "x" }), role: "pattern" },
+      { token: expect.objectContaining({ text: "src" }), role: "paths" },
+    ]);
+  });
+
+  it("未声明的选项保持旧口径（`-newer f.txt` 的取值仍占角色槽）", () => {
+    const entry = findProfile();
+    const argv = argvOf("find", ".", "-newer", "f.txt");
+    const plan = planReadOnly(argv, [entry]);
+    expect([...(plan?.valueTokenIndexes ?? new Set<number>())]).toEqual([]);
+    expect(planPositionalRoles(argv, entry, plan?.valueTokenIndexes ?? new Set())).toEqual([
+      { token: expect.objectContaining({ text: "." }), role: "paths" },
+      { token: expect.objectContaining({ text: "f.txt" }), role: "paths" },
+    ]);
+  });
+
+  it("unsafeOptions 优先于 nonFileValueOptions（同一选项同时列入时仍取消）", () => {
+    const both = profile({
+      argv: ["find"],
+      roles: ["paths"],
+      unsafeOptions: ["-name"],
+      nonFileValueOptions: ["-name"],
+    });
+    expect(planReadOnly(argvOf("find", ".", "-name", "x"), [both])?.cancel).toBe(
+      "unsafe-option:-name",
+    );
   });
 });
 

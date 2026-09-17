@@ -219,6 +219,29 @@ export PI_CODING_AGENT_DIR=/tmp/agent PI_OFFLINE=1     # 隔离的 <agentDir>，
 
 最后一行是**预期边界**：未声明档案的命令仍然逐次评审（D29），把 `text-tools` 加进 `readOnly.profiles` 即可放行。
 
+### 3.12 `nonFileValueOptions`：选项取值不再被当成文件（真实会话，2026-09，零模型调用）
+
+用**用户真实配置**（含 `permission.path["*.pem"] = "deny"`）驱动，验证 D34 的修复：
+
+```bash
+{
+  printf '%s
+' '{"id":"b1","type":"bash","command":"find . -name '''*.pem''' | head -2"}'; sleep 5
+  printf '%s
+' '{"id":"b2","type":"bash","command":"find . -mtime -7 -type f | head -2"}'; sleep 5
+  printf '%s
+' '{"id":"b3","type":"bash","command":"head -n 3 package.json"}'; sleep 5
+} | pi --mode rpc --no-session -a -e <仓库路径>
+```
+
+| 命令 | 结果 |
+|---|---|
+| `find . -name '*.pem' \| head -2` | `allow, source: policy`（修复前：`-name` 的取值 `*.pem` 被当成读路径 → 命中 `*.pem: deny` → **deny**） |
+| `find . -mtime -7 -type f \| head -2` | `allow, source: policy`（修复前：`-7` 被当成选项 → `option-not-allowed:-7` → review） |
+| `head -n 3 package.json` | `allow, source: policy`（幽灵路径 `3` 消失） |
+
+危险形态仍被拦（单测覆盖，`readonly-profiles.test.ts`）：`find . -name x -delete` → `readOnlyCancel=option-not-allowed:-delete`；`find . -fprint out.txt` → `option-not-allowed:-fprint`；`find . -exec rm {} ;` → `unresolved=indirection-wrapper`。
+
 ## 4. 待人工执行（需要真实模型 / 交互 UI / 真实子代理）
 
 | 场景 | 为什么不能脚本化 | 最小步骤 | 期望 |
