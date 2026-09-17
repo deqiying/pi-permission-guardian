@@ -24,10 +24,11 @@ afterEach(() => {
 });
 
 function tempDir(): string {
-  // 从真实形起算：windows-latest 的 %TEMP% 是 8.3 短名路径（`C:\Users\RUNNER~1\…`），
-  // realpath 会把它还原成长名，于是「真实形 === 词法形」这类严格比较会被环境打脸，
-  // 而不是反映被测逻辑。归一根目录后，词法形与真实形才在同一个基线上比较。
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), "guardian-paths-")));
+  // 从真实形起算，且必须用 `.native`：被测代码（src/facts/path-value.ts 的 tryRealpath）用的就是它。
+  // 两者在 Windows 上不等价：8.3 短名（windows-latest 的 %TEMP% 是 `C:\Users\RUNNER~1\…`）
+  // 会被 `.native` 展开成长名，而 JS 版 realpathSync 原样保留，于是「真实形 === 词法形」
+  // 这类严格比较会比环境打脸，而不是反映被测逻辑。
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "guardian-paths-")));
   tempDirs.push(dir);
   return dir;
 }
