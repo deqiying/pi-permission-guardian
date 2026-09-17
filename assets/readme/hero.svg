@@ -14,7 +14,7 @@
     <text y="252" font-size="22" fill="#c3cfda">名单未命中或标记 review：交给独立评审模型</text>
     <line x1="0" y1="292" x2="632" y2="292" stroke="#1c242d" stroke-width="1"/>
     <text y="330" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Cascadia Mono', monospace"
-          font-size="18" fill="#8c9aa8">pi &gt;= 0.85.1&#160;&#160;&#160;&#160;node &gt;= 22&#160;&#160;&#160;&#160;Apache-2.0&#160;&#160;&#160;&#160;v0.1.1</text>
+          font-size="18" fill="#8c9aa8">pi &gt;= 0.85.1&#160;&#160;&#160;&#160;node &gt;= 22&#160;&#160;&#160;&#160;Apache-2.0</text>
   </g>
 
   <!-- 证据：参考配置里真实存在的 bash 规则，按动作分组 -->

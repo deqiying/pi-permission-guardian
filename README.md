@@ -8,12 +8,10 @@
   <img alt="license: Apache-2.0" src="https://img.shields.io/static/v1?label=license&amp;message=Apache-2.0&amp;color=4ac26b&amp;style=flat-square">
   <img alt="pi &gt;= 0.85.1" src="https://img.shields.io/static/v1?label=pi&amp;message=%E2%89%A5%200.85.1&amp;color=5aa9f0&amp;style=flat-square">
   <img alt="node &gt;= 22" src="https://img.shields.io/static/v1?label=node&amp;message=%E2%89%A5%2022&amp;color=e0a63a&amp;style=flat-square">
-  <img alt="release v0.1.1" src="https://img.shields.io/static/v1?label=release&amp;message=v0.1.1&amp;color=6e7681&amp;style=flat-square">
+  <img alt="release: 最新 tag" src="https://img.shields.io/github/v/tag/deqiying/pi-permission-guardian?style=flat-square&amp;color=6e7681&amp;label=release">
 </p>
 
 pi agent 的命令执行护栏插件：**黑白名单快速裁决 + 名单外/需复查项交由模型判定**，在高风险操作与跨工作目录读写场景下减少人工介入。斜杠命令为 `/perm`。
-
-> 状态：**M0~M7 全部实现**（配置加载/合并/规范化、`/perm` 命令、会话状态与审计日志、tree-sitter 事实提取、glob 规则求值、跨层最严格者合并、会话授权、`tool_call` 与 `user_bash` 端到端裁决、独立评审模型接入与 FR-23 风险门槛、判定缓存/熔断/预评分三项降本机制、子代理会话识别与 `subagentPolicy`、pi package 打包与内容门禁）。哪些环节在真实 pi 会话里验证过、哪些没有，见[验证状态](#验证状态)。
 
 ## 真实会话里的裁决
 
@@ -65,7 +63,7 @@ pi agent 的命令执行护栏插件：**黑白名单快速裁决 + 名单外/�
 | 方式 | 命令 | 写入位置 |
 |---|---|---|
 | npm（`latest`） | `pi install npm:pi-permission-guardian` | `<agentDir>/settings.json` |
-| git（ref 固定） | `pi install git:github.com/deqiying/pi-permission-guardian@v0.1.1` | `<agentDir>/settings.json` |
+| git（ref 固定） | `pi install git:github.com/deqiying/pi-permission-guardian@v0.1.3` | `<agentDir>/settings.json` |
 | 本地路径 | `pi install /absolute/path/to/pi-permission-guardian` | `<agentDir>/settings.json`，只引用不复制 |
 | 项目级 | 以上任一命令加 `-l` | `<cwd>/.pi/settings.json`，随仓库共享；项目需被信任 |
 | 只试用不安装 | `pi -e /absolute/path/to/pi-permission-guardian` | 仅本次运行（临时目录） |
@@ -126,17 +124,6 @@ Schema：[`schemas/guardian.schema.json`](schemas/guardian.schema.json)。
 - **审计日志异步落盘**：`record()` 只入队，`session_shutdown` 才 flush；进程被强杀时尾部条目可能缺失（影响可追溯性，不影响裁决）。
 - **配置失效时逐次人工确认**：存在失效配置层（或配置根本没加载出来）时，保守落点是 `ask`（人工确认），不是 `review` / `deny`（D26 / FR-51 / FR-63 / FR-64）。原设计选 `review` 的前提是“评审可用”，而评审依赖同一份可能已读坏的 `reviewer.model`；一旦评审不可用，落点就退化成 `deny`，写错一个字段就会让内置 `read` 也被拦，且理由指向评审模型。代价是修好配置前每次调用都要确认（修好后用 `/perm reload` 重载）；失效层里写的 `yoloMode: true` 不生效（D27），否则它会把这个人工确认落点又放开。
 
-## 验证状态
-
-| 范围 | 状态 |
-|---|---|
-| Windows 11 + pi 0.85.1 真实会话 | **已执行**：安装与自动发现加载、`/perm status` 自检、只读放行（S1）、规则拦截（S2）、评审不可用不放行（S6 未配置分支）、非法配置降级、审计落盘、卸载 |
-| 需要真实评审模型 / 交互弹窗 / 真实子代理会话 | **未执行**：S3（名单外命令交评审）、S4（跨目录读写的工具路径）、S5（弹窗与会话授权）、S7（真实子会话）、`--perm` flag 与 TUI 状态栏外观 |
-| Linux / macOS 真实会话 | **未验证**：CI 在双平台只跑 typecheck / test / 打包校验，不跑真实 pi 会话 |
-| 自动化门禁 | `typecheck` → `test` → `validate:config` → `check:pack` 由 CI 在两个平台执行（命令与触发方式见[开发](#开发)） |
-
-逐项清单、复现步骤与未覆盖场景见 [`docs/smoke-test.md`](docs/smoke-test.md)。
-
 ## 文档
 
 | 文档 | 内容 |
@@ -145,7 +132,7 @@ Schema：[`schemas/guardian.schema.json`](schemas/guardian.schema.json)。
 | [docs/architecture.md](docs/architecture.md) | 模块划分、决策管线、事实提取、规则引擎、评审器、降本机制、失败语义矩阵、打包与测试策略 |
 | [docs/configuration.md](docs/configuration.md) | 全部配置字段的语义、规则编排顺序、surface 与默认动作矩阵 |
 | [docs/implementation-plan.md](docs/implementation-plan.md) | M0~M7 实施顺序、逐阶段文件范围、测试门禁与完成定义 |
-| [docs/smoke-test.md](docs/smoke-test.md) | M7 手动冒烟记录：S1~S7 的复现步骤、已观察结果、待人工场景与未验证边界 |
+| [docs/smoke-test.md](docs/smoke-test.md) | 手动冒烟测试：复现步骤与观察记录 |
 
 ## 开发
 
@@ -161,7 +148,7 @@ Schema：[`schemas/guardian.schema.json`](schemas/guardian.schema.json)。
 
 运行时依赖是 `zod`（配置 schema 唯一真源）与 `tree-sitter-bash` / `web-tree-sitter`（bash 事实提取）；pi 相关包均为 `peerDependencies`，由宿主提供。
 
-CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在 `ubuntu-latest` 与 `windows-latest` 上依次执行 `typecheck` → `test` → `validate:config` → `check:pack`；触发方式是**推送发布版本 tag（`v*`）**，PR 与 `main` 直推不触发，所以推送前请在本地跑完同一组命令。真实 pi 会话冒烟不在 CI 内，属于交付前的人工门禁。
+CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在 `ubuntu-latest` 与 `windows-latest` 上依次执行 `typecheck` → `test` → `validate:config` → `check:pack`；触发方式是**推送发布版本 tag（`v*`）**，PR 与 `main` 直推不触发，所以推送前请在本地跑完同一组命令。
 
 发布也随这条链走：verify 双腿全绿后，`publish` job 用 npm trusted publishing（OIDC）把 tag 对应的版本发出去，不需要长期 token，provenance 自动生成。npm 侧的一次性配置、首次演练与失败重跑见 [`docs/release.md`](docs/release.md)。
 
