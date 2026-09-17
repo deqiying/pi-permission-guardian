@@ -1,0 +1,5 @@
+# 文本文件在索引与工作树里统一使用 LF。
+# 仓库基线要求 LF，而 Windows 上 core.autocrlf=true（含 windows-latest runner）会把检出内容
+# 改成 CRLF；schemas/guardian.schema.json 的漂移门禁（test/config/schema.test.ts）是字节比对，
+# CRLF 检出会把它变成假失败（FR-57）。
+* text=auto eol=lf

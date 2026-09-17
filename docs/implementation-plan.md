@@ -363,7 +363,7 @@ schema generation script
 1. `files` 覆盖 `extensions/`、`src/`、`schemas/`、`config/` 与文档（README、LICENSE、`docs/`）；由 `scripts/check-pack.ts`（`npm run check:pack`）真实执行一次 `npm pack --dry-run --json` 并断言：必需文件齐全、`pi.extensions` 入口的相对 import 闭包全在 tarball 内、不含 `test/` `scripts/` `reference/` `node_modules/` `.github/`。
 2. `prepack` 在打包前重新生成 schema，保证发出去的那份永远与 zod 同步；“提交版 schema 与 zod 输出一致”的漂移门禁由 `test/config/schema.test.ts` 与 `check:pack` 的“prepack 是否就地改写”检测共同承担。
 3. README 增加安装（npm / git / 本地路径、全局与 `-l` 项目级、`pi -e` 试用）、卸载回滚、`/perm` 命令、已知限制与平台验证范围。
-4. CI（`.github/workflows/ci.yml`）在 `ubuntu-latest` 与 `windows-latest` 上依次执行 typecheck、test、`validate:config`、`check:pack`（含 package dry-run）。
+4. CI（`.github/workflows/ci.yml`）在 `ubuntu-latest` 与 `windows-latest` 上依次执行 typecheck、test、`validate:config`、`check:pack`（含 package dry-run）；触发条件是推送发布版本 tag（`v*`）或手动 `workflow_dispatch`，PR 与 `main` 直推不触发（一次发布只跑一轮门禁）。
 5. 真实 pi 0.85.1 会话冒烟：不依赖评审模型与交互 UI 的环节已在 Windows 执行并记录在 `docs/smoke-test.md`（安装/卸载、加载、`/perm status`、S1、S2、S6 未配置分支、非法配置 fail-closed、审计落盘）；S3、S4 的工具路径、S5、S7 与真实超时分支需人工执行，同文档给出步骤、期望与未验证的边界。
 
 ### 验证门禁

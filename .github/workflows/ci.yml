@@ -4,11 +4,13 @@ name: CI
 # 打包内容校验（check:pack 内部执行 `npm pack --dry-run`，并断言 tarball 内容）。
 # 双平台：Windows 分支上有平台条件逻辑（路径归一、MSYS 形式、UNC 不 realpath、
 # 临时目录清理），只在 Ubuntu 上跑会漏掉这些分支的真实行为。
-
+#
+# 触发策略：只在推送发布版本 tag（v*）时执行（加手动 workflow_dispatch）；PR 与 main 直推不触发。
+# 这与 scripts/release.sh 的流程一致——推送分支 + 推送 tag 只产生一轮门禁，而不是两轮。
+# 代价是 PR 没有 CI 门禁：交付前需在本地跑完同一组命令（见 README「开发」）。
 on:
   push:
-    branches: [main]
-  pull_request:
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
@@ -25,11 +27,12 @@ jobs:
         os: [ubuntu-latest, windows-latest]
 
     steps:
+      # v4 的目标运行时是 Node 20，会被 runner 强制升到 Node 24 并报警告（v5 起是 Node 24）。
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           # engines 声明的最低版本：CI 要守住这个下限。
           node-version: 22.x

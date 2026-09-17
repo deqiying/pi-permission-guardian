@@ -196,4 +196,6 @@ npm run validate:config  # 参考配置是严格 JSON 且通过 zod 与提交版
 npm run check:pack       # npm pack --dry-run + tarball 内容断言 + schema 漂移检测
 ```
 
-前三条在 `.github/workflows/ci.yml` 里于 `ubuntu-latest` 与 `windows-latest` 双平台执行，最后一条放在末尾（`prepack` 会重新生成 schema，漂移检测必须先跑完）。本文件记录的真实会话冒烟不在 CI 内，属于交付前的人工门禁。
+前三条在 `.github/workflows/ci.yml` 里于 `ubuntu-latest` 与 `windows-latest` 双平台执行，最后一条放在末尾（`prepack` 会重新生成 schema，漂移检测必须先跑完）。CI 由发布版本 tag（`v*`）触发，PR 与 `main` 直推不触发，所以这些命令也是 PR 交付前的本地门禁。本文件记录的真实会话冒烟不在 CI 内，属于交付前的人工门禁。
+
+双平台注意：`.gitattributes` 把文本文件钉在 LF（`core.autocrlf` 会把 schema 改成 CRLF，使漂移检测假失败）；`test/facts/path-value.test.ts` 的临时目录从真实形起算（windows-latest 的 `%TEMP%` 是 `C:\Users\RUNNER~1\…` 这类 8.3 短名，realpath 会还原成长名）。

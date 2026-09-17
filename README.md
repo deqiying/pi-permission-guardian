@@ -97,7 +97,9 @@ Schema：[`schemas/guardian.schema.json`](schemas/guardian.schema.json)。
 修改配置结构时必须先改 zod schema，再跑 `gen:schema`；提交版 schema 与生成结果不一致时测试会失败（FR-57）。`prepack` 会在打包前重新生成 schema，因此 `check:pack` 在 CI 里排在最后。
 运行时依赖是 `zod`（配置 schema 唯一真源）与 `tree-sitter-bash` / `web-tree-sitter`（bash 事实提取）；pi 相关包均为 `peerDependencies`，由宿主提供。
 
-CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在 `ubuntu-latest` 与 `windows-latest` 上依次执行 `typecheck` → `test` → `validate:config` → `check:pack`；真实 pi 会话冒烟不在 CI 内，属于交付前的人工门禁。
+CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在 `ubuntu-latest` 与 `windows-latest` 上依次执行 `typecheck` → `test` → `validate:config` → `check:pack`；触发方式是**推送发布版本 tag（`v*`）**，PR 与 `main` 直推不触发，所以推送前请在本地跑完同一组命令。真实 pi 会话冒烟不在 CI 内，属于交付前的人工门禁。
+
+仓库用 [`.gitattributes`](.gitattributes) 把文本文件统一钉在 LF：schema 漂移门禁用例是字节比对，Windows 上被 `core.autocrlf` 转成 CRLF 会导致假失败。
 
 ## 许可证
 

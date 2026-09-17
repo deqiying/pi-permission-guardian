@@ -24,7 +24,10 @@ afterEach(() => {
 });
 
 function tempDir(): string {
-  const dir = mkdtempSync(join(tmpdir(), "guardian-paths-"));
+  // 从真实形起算：windows-latest 的 %TEMP% 是 8.3 短名路径（`C:\Users\RUNNER~1\…`），
+  // realpath 会把它还原成长名，于是「真实形 === 词法形」这类严格比较会被环境打脸，
+  // 而不是反映被测逻辑。归一根目录后，词法形与真实形才在同一个基线上比较。
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "guardian-paths-")));
   tempDirs.push(dir);
   return dir;
 }
