@@ -54,8 +54,10 @@ import { applyReviewOutcome } from "./policy.ts";
 /**
  * 决策管线（architecture §4）。
  *
- * 顺序：engaged → gate → 熔断 → classify → facts → rule → grant → cache → 预评分 → review → ask
- * → outcome → 熔断记账 → 写缓存。
+ * 顺序：engaged → 配置已加载？ → gate → 熔断 → classify → facts → rule → grant → cache → 预评分
+ * → review → ask → outcome → 熔断记账 → 写缓存。
+ * - **配置未加载（FR-64）**：`runtime.config === undefined` 时走独立分支，按 schema 默认 gate 纳入
+ *   裁决的调用转人工确认（无 UI 时 `deny`），不参与熔断与缓存（阈值与 key 来自读不到的配置）。
  * - **grant 在 rule 之后**：授权只能把 `ask` / `review` 放宽为 `allow`，永不覆盖 `deny`，
  *   且 `unresolved` 调用不享受授权（用户决策 2026-01，见 docs/architecture.md §4/§8.1）。
  * - **cache 在 grant 之后、review 之前**：只复用确定结论，且 `unresolved` 调用跳过（FR-31/32）。
@@ -277,6 +279,76 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
     };
   }
 
+  /**
+   * FR-64：配置根本没加载出来时的落点。
+   *
+   * `runtime.config === undefined` 表示会话未启动、加载过程抛了异常，或 `/perm on` 在加载前
+   * 强行启用（`extension/state.ts` 的既有契约）。此时读不到任何字段，因此：
+   *
+   * - 落点取 `ask`（人工确认）而不是 `deny`：配置未加载是护栏自身的状态，不是这次调用有风险。
+   *   原实现的 fail-closed deny 会把“护栏自己没起来”报成“这次调用被拦了”，与 D26 的取向相反。
+   * - 纳入裁决的范围按 schema 默认 gate（`side-effect`：pi 内置工具）：不能因为“读不出配置”
+   *   就把自定义 / MCP 工具也拉进来 —— 安全方向应当是转人工，而不是扩大拦截面。
+   * - 不提供“本会话允许此类”：`sessionGrants` 读不出来，不猜。
+   * - 无交互界面时仍然落到 `deny`（读不到 `onAskWithoutUI`，fail-closed）。
+   *
+   * 熔断器与判定缓存都不参与：它们的阈值与 key 维度都来自读不到的配置。
+   */
+  async function decideUnloadedConfig(
+    request: DecisionRequest,
+    ctx: ExtensionContext,
+  ): Promise<DecisionOutcome | undefined> {
+    const { toolName } = request;
+    if (!isBuiltinTool(toolName)) {
+      return undefined;
+    }
+
+    const started = Date.now();
+    const surface = toolSurface(toolName);
+    const lead =
+      "配置未加载（会话未启动或加载失败），护栏没有规则可评估这次调用（FR-64）。";
+
+    if (!ctx.hasUI) {
+      const outcome: DecisionOutcome = {
+        proposed: "ask",
+        final: "deny",
+        source: "policy",
+        reason: withAntiCircumvention(`${lead}无交互界面可确认，按 fail-closed 拦截。`),
+        surface,
+        targets: [],
+      };
+      record(ctx, request, outcome, Date.now() - started);
+      return outcome;
+    }
+
+    const decision = await askHuman(ctx, {
+      action: `工具 ${toolName}；配置未加载，没有规则可评估；目标：（无）`,
+      rule: "护栏尚未加载配置（FR-64）",
+      risk: "读不到任何规则与失败分支配置，无法判断这次调用是否安全。",
+      note: `${lead}修好配置后用 /perm reload 重载。`,
+      suggestion: "先修复并重载配置；确需执行时建议由你自己执行该命令。",
+      suggestions: [],
+    });
+
+    // 只接受“仅此次”：会话授权需要 `sessionGrants` 配置，而它读不出来（强行收到按拒绝处理）。
+    const allowed = decision?.choice === "once";
+    const reason = allowed
+      ? "人工确认（配置未加载）：仅此次允许。"
+      : decision?.note === undefined
+        ? "人工拒绝（配置未加载）。"
+        : `人工拒绝（配置未加载）：${decision.note}`;
+    const outcome: DecisionOutcome = {
+      proposed: "ask",
+      final: allowed ? "allow" : "deny",
+      source: "human",
+      surface,
+      targets: [],
+      reason: allowed ? reason : withAntiCircumvention(reason),
+    };
+    record(ctx, request, outcome, Date.now() - started);
+    return outcome;
+  }
+
   async function decide(
     request: DecisionRequest,
     ctx: ExtensionContext,
@@ -291,9 +363,8 @@ export function createDecisionEngine(deps: DecisionEngineDeps): DecisionEngine {
 
     const config = deps.runtime.config;
     if (config === undefined) {
-      // `runtime.config` 为 undefined 表示本会话尚未成功加载配置，必须 fail-closed，
-      // 不能当成"未安装护栏"而放行（extension/state.ts 的既有契约）。
-      return failClosed(toolName, "配置尚未加载，按 fail-closed 拦截。");
+      // FR-64：配置没加载出来时的落点是一条独立分支（人工确认，而不是 deny）。
+      return decideUnloadedConfig(request, ctx);
     }
 
     if (!isGated(toolName, config)) {

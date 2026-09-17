@@ -42,7 +42,8 @@ export interface GuardianRuntime {
    * 已解析的配置。
    *
    * `undefined` 表示本会话尚未成功加载配置（会话未启动，或加载过程抛出异常）。
-   * 决策入口遇到 `undefined` 必须按 fail-closed 处理，不能当成"未安装护栏"放行。
+   * 决策入口遇到 `undefined` 时既不能当作“未安装护栏”放行，也不能一律 deny：按 FR-64 走人工确认
+   * （无 UI 时 `deny`），纳入裁决的范围按 schema 默认 gate。
    */
   config: ResolvedConfig | undefined;
   /** 每次成功刷新配置后自增，供缓存 key 失效（FR-31）与 `/perm status` 观察。 */

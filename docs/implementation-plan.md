@@ -7,7 +7,7 @@
 
 ## 1. 实施边界
 
-v1 只实现需求文档中的 FR-1 至 FR-61。计划不包含以下工作：
+v1 只实现需求文档中的 FR-1 至 FR-64。计划不包含以下工作：
 
 - 不把插件扩展为系统级沙箱，也不承诺完整解析所有 shell 动态行为。
 - 不实现跨进程授权转发、远程权限服务或历史坏数据修复。
@@ -105,9 +105,9 @@ scripts/generate-schema.ts
 3. 实现 JSONC 预处理，替换注释和尾逗号时保留换行，确保校验错误能映射回原文件行号。
 4. 同层规则保持 last-match-wins；跨层动作按 `deny > ask > review > allow` 合并；`onMixedCommandActions` 按 `deny > ask > review` 合并。
 5. 将 `path` 和 `external_directory` 语法糖展开为读写方向键，合成 baseline 规则表（默认动作矩阵，§6.4）
-   并放在规则表第一位；`degraded` 时把 baseline 里的 `allow` 抬升为 `review`。baseline 是**兜底层**：
+   并放在规则表第一位；`degraded` 时把 baseline 里的 `allow` 与 `review` 都抬到 `ask`（FR-63）。baseline 是**兜底层**：
    只在 global / project 都未命中时才参与裁决（architecture §6.1）。
-6. 项目未受信任时跳过项目层，按全局配置继续并显式提示；配置解析失败时按 FR-51 将该层所有 `allow` 抬升为 `review`，不允许静默放行。
+6. 项目未受信任时跳过项目层，按全局配置继续并显式提示；配置解析失败时按 FR-51/FR-63 将该层所有 `allow` 抬升为 `ask`，不允许静默放行，也不允许把落点变成不可执行的 `deny`。
 7. 在 `session_start` 和 `before_agent_start` 刷新配置；在 `session_shutdown` 清理会话态。
 8. 实现 `/perm on|off|status|reload|grants|clear-grants` 和 `--perm` flag。
 9. 实现审计日志基础写入：按本地日期切分、默认保留 14 个自然日、异步失败只告警。POSIX 下创建权限为 `0600`，Windows 下记录平台限制。
@@ -132,6 +132,9 @@ scripts/generate-schema.ts
 - 未知字段、非法动作、`retentionDays=0`、`subagentPolicy.defaultAction=allow` 被拒绝。
 - 未受信任项目的项目配置不生效，且 `/perm status` 明确显示原因。
 - `/perm reload` 后配置版本号变化；`session_shutdown` 后会话态清空。
+- 配置失效（FR-51/FR-63）：坏层不生效或逐字段抢救后，未命中用户规则的调用兜底动作是 `ask`，不是 `review`/`deny`；失效层里写的 `allow` 抬升为 `ask`，同层的 `deny` 仍保留；`onReviewUnavailable` 未被显式设置时默认值回退为 `ask`（显式取值不受影响）。
+- 失效层不参与 `yoloMode` 投票（D27）：失效层里的 `yoloMode: true` 不生效，健康层显式写的值仍生效。
+- 配置未加载（FR-64）：`runtime.config === undefined` 且已启用时，内置工具转人工确认（无 UI 时 `deny`），不创建会话授权。
 
 ## 5. M2 Facts 事实层
 
@@ -222,6 +225,7 @@ src/interact/dialog.ts
 ### 验证门禁
 
 - FR-1 至 FR-10、FR-29、FR-30、FR-59、FR-61 全绿。
+- 配置失效时 baseline 的兜底动作是 `ask`（不是 `review`，FR-63）；失效层里写的 `allow` 抬升为 `ask` 后仍不得压过用户显式写的 `deny`。
 - `echo ok && rm -rf /` 不能由第一个 allow 覆盖第二个 deny。
 - **baseline 兑底不得压过用户显式写的 `allow`**：global 层写 `"rm -rf ./dist": "allow"` 时最终必须是 `allow`，而不是默认矩阵的 `review`（baseline 只在用户层全未命中时参与）。
 - `unresolved + deny` 固定为 `ask`，不受 `onUnresolvedFacts` 放宽。
@@ -424,6 +428,7 @@ npm run check:pack
 
 - 是否存在绕过统一 pipeline 的第二条裁决路径。
 - 是否把 unresolved、评审失败、解析失败或配置失败放宽为 allow。
+- 是否把配置不可信（失效层 / 未加载）时的保守落点写成不可执行的 `deny`，或把拦截理由写成与真实原因无关的评审失败（FR-63/FR-64）。
 - 是否让模型、缓存或自动审核创建会话授权。
 - 是否在插件中硬编码模型协议或自行处理认证。
 - 是否用原始命令字符串替代 AST facts。
@@ -435,7 +440,7 @@ npm run check:pack
 
 满足以下条件后，v1 才视为实施完成：
 
-1. FR-1 至 FR-61 均有对应实现或明确的文档化边界。
+1. FR-1 至 FR-64 均有对应实现或明确的文档化边界。
 2. 架构文档列出的所有负向测试均存在并稳定通过。
 3. pi 0.85.1 下真实安装、加载、`/perm status` 和 S1 至 S7 冒烟通过（已执行范围与待人工场景见 `docs/smoke-test.md`）。
 4. 参考配置、schema、README 和实现行为一致。

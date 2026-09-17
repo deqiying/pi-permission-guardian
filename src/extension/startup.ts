@@ -97,7 +97,7 @@ export function createSessionController(
     );
     if (config.degraded) {
       messages.push(
-        "[pi-permission-guardian] 存在失效配置层：未命中规则的默认动作按保守侧处理（FR-51）",
+        "[pi-permission-guardian] 存在失效配置层（配置有误）：未命中规则的调用会转人工确认，修好后用 /perm reload 重载（FR-51/FR-63）",
       );
     }
     if (config.yoloMode) {

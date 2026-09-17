@@ -1,4 +1,8 @@
-import type { Action, GuardianConfig } from "./schema.ts";
+import {
+  type Action,
+  type GuardianConfig,
+  mostRestrictiveAction,
+} from "./schema.ts";
 
 /**
  * 配置规范化（FR-3）：把 `path` / `external_directory` 语法糖展开为读写方向键，
@@ -179,7 +183,16 @@ export const DEFAULT_ACTION_MATRIX: ReadonlyArray<readonly [string, Action]> = [
 
 /** baseline 合成规则的 `reason`：让审计日志与拦截提示能说清"这是默认值，不是我写的规则"。 */
 export const BASELINE_REASON = "默认动作矩阵";
-export const BASELINE_TIGHTENED_REASON = "配置存在失效层，默认动作收紧为 review";
+/** 失效层的兜底理由：让审计与提示说得清"这次人工确认是配置有误导致的"（FR-63）。 */
+export const BASELINE_TIGHTENED_REASON = "配置存在失效层（配置有误），兜底动作改为人工确认";
+
+/** 失效层让兜底动作"至少到 ask"：`allow`（读类）与 `review`（写类 / 命令类）都会被抬到 `ask`。 */
+const DEGRADED_FLOOR: Action = "ask";
+
+/** 与 `ask` 取最严格者：`deny` 仍胜出，`ask` 保持，`review` / `allow` 抬到 `ask`。 */
+function tightenToAsk(action: Action): Action {
+  return mostRestrictiveAction([action, DEGRADED_FLOOR], DEGRADED_FLOOR);
+}
 
 /**
  * 合成 baseline 规则表（FR-8、FR-51）。
@@ -190,8 +203,11 @@ export const BASELINE_TIGHTENED_REASON = "配置存在失效层，默认动作�
  *    排查都只需要看一张表，不用再记住一段代码里的兜底顺序。
  * 2. `permission["*"]` 的语义自然成立：它是用户层里的一条 `*` surface 规则，总是能命中，
  *    因此 baseline 永远不会参与 ⇒ 自动覆盖默认矩阵（§6.4），不需要额外分支。
- * 3. `degraded` 时的收紧（configuration.md §3）也变成表里的事实：合成时把所有 `allow`
- *    抬升为 `review`，而不是让求值器记一个"配置有坏层"的开关。
+ * 3. `degraded` 时的收紧（configuration.md §3）也变成表里的事实：合成时把每个兜底动作抬到
+ *    “至少 `ask`”（`allow` / `review` → `ask`），而不是让求值器记一个“配置有坏层”的开关。
+ *    抬到 `ask` 而不是 `review`：`review` 依赖同一份可能已读坏的配置里的 `reviewer.model`，
+ *    评审不可用时它只会落成 `onReviewUnavailable`（默认 `deny`），把“配置写错”变成
+ *    无差别拦截（D26 / FR-63）。
  *
  * 但 baseline 是**兜底层，不是普通层**：只有当 global / project 都没命中规则时才参与。
  * 否则默认值会压过用户的显式决定 —— `permission.bash` 里写 `"rm -rf ./dist": "allow"`
@@ -206,14 +222,14 @@ export const BASELINE_TIGHTENED_REASON = "配置存在失效层，默认动作�
 export function buildBaselineRules(options: { tightened: boolean }): LayerRules {
   const surfaces = new Map<string, RuleEntry[]>();
   for (const [surface, action] of DEFAULT_ACTION_MATRIX) {
-    // 只有真的被抬升（原本 allow）才换 reason：本来就 review 的 surface 没变过，
-    // 给它挂"已收紧"的理由会误异审计日志与提示词。
-    const lifted = options.tightened && action === "allow";
+    const lifted = options.tightened ? tightenToAsk(action) : action;
     surfaces.set(surface, [
       {
         pattern: "*",
-        action: lifted ? "review" : action,
-        reason: lifted ? BASELINE_TIGHTENED_REASON : BASELINE_REASON,
+        action: lifted,
+        // 只有动作真的变了才换 reason：当前矩阵里没有 `ask` / `deny`，所以失效时每个 surface
+        // 都会被挂上“已收紧”；保留判据是为了将来往矩阵里加 `ask` / `deny` 时不误挂理由。
+        reason: lifted === action ? BASELINE_REASON : BASELINE_TIGHTENED_REASON,
         index: 0,
       },
     ]);

@@ -155,17 +155,12 @@ export function createUserBashController(deps: UserBashDeps): UserBashController
         if (!deps.runtime.engaged) {
           return undefined;
         }
-        if (config === undefined) {
-          return {
-            result: replacementResult(
-              withAntiCircumvention("配置尚未加载，按 fail-closed 拦截。"),
-            ),
-          };
-        }
-        if (!config.userBashPolicy.enabled) {
+        if (config !== undefined && !config.userBashPolicy.enabled) {
           // 关闭后用户直接执行的命令完全不经过本插件（FR-60）。
           return undefined;
         }
+        // `config === undefined` 时不在这里短接：交给同一个决策内核按 FR-64 处理
+        // （人工确认；无 UI 时 deny），否则两个入口会长出两套“配置未加载”语义。
 
         const outcome = await deps.engine.decide(
           {

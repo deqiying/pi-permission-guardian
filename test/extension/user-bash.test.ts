@@ -158,20 +158,24 @@ describe("决策映射（FR-60）", () => {
     expect(ORDER).toHaveLength(0);
   });
 
-  it("未启用与配置缺失都按 fail-closed 处理", async () => {
+  it("未启用时完全不介入；配置缺失时交给决策内核处理（FR-64）", async () => {
     const disabled = setup(stubEngine(denyOutcome()), (runtime) => {
       runtime.engaged = false;
     });
     await expect(
       disabled.controller.handler(event("rm -rf /"), context()),
     ).resolves.toBeUndefined();
+    expect(ORDER).toHaveLength(0);
 
+    // 配置缺失不在适配层短接：`userBashPolicy` 读不出来，但裁决仍走同一个内核，
+    // 由内核按 FR-64 处理（转人工确认；无 UI 时 deny）。这里用桩引擎断言“确实交出去了”。
     const unloaded = setup(stubEngine(denyOutcome()), (runtime) => {
       runtime.config = undefined;
     });
     const result = await unloaded.controller.handler(event("rm -rf /"), context());
+    expect(ORDER).toHaveLength(1);
+    expect(ORDER[0]?.origin).toBe("user_bash");
     expect(result?.result?.exitCode).toBe(1);
-    expect(result?.result?.output).toContain("配置尚未加载");
   });
 
   it("决策内核抛错时返回拒绝结果，而不是让命令照跑", async () => {

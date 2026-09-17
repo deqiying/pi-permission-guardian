@@ -166,7 +166,7 @@ export function renderStatusReport(
   lines.push(
     `- 配置版本：${runtime.configVersion}｜规则：用户 ${config.ruleCount} 条 + 合成默认 ${
       config.baselineRuleCount
-    } 条${config.degraded ? "｜存在失效层（默认动作已收紧）" : ""}`,
+    } 条${config.degraded ? "｜存在失效层（兜底动作已改为人工确认）" : ""}`,
   );
 
   // baseline 不是配置文件，但必须可见：否则用户会不解"为什么没写规则也会被拦"。
@@ -174,7 +174,7 @@ export function renderStatusReport(
   if (baseline !== undefined) {
     lines.push(
       `- 合成默认（baseline）：surface ${baseline.surfaces.size} 个｜只在用户层全未命中时参与${
-        config.degraded ? "（已把 allow 收紧为 review）" : ""
+        config.degraded ? "（已把兜底动作收紧为 ask）" : ""
       }`,
     );
   }
@@ -250,7 +250,11 @@ export function renderStatusReport(
     }`,
   );
   lines.push(
-    `- 失败分支：onReviewUnavailable=${config.onReviewUnavailable} onUnresolvedFacts=${config.onUnresolvedFacts} onAskWithoutUI=${config.onAskWithoutUI} onMixedCommandActions=${config.onMixedCommandActions}`,
+    `- 失败分支：onReviewUnavailable=${config.onReviewUnavailable} onUnresolvedFacts=${config.onUnresolvedFacts} onAskWithoutUI=${config.onAskWithoutUI} onMixedCommandActions=${config.onMixedCommandActions}${
+      config.degraded
+        ? "｜存在失效层：onReviewUnavailable 未被显式设置时回退为 ask（FR-63）"
+        : ""
+    }`,
   );
 
   return lines.join("\n");

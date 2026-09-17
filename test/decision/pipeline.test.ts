@@ -228,14 +228,92 @@ describe("决策管线：放行与拦截", () => {
     expect(outcome?.targets).toContain("/repo/.env");
   });
 
-  it("配置尚未加载时按 fail-closed 拦截", async () => {
+  it("配置未加载：无 UI 时按 fail-closed 拦截（FR-64）", async () => {
     const harness = setup();
     harness.runtime.config = undefined;
 
-    const result = await harness.engine.handleToolCall(bashEvent("echo hi"), context(harness));
+    const result = await harness.engine.handleToolCall(
+      bashEvent("echo hi"),
+      context(harness, { hasUI: false }),
+    );
 
     expect(result?.block).toBe(true);
-    expect(result?.reason).toContain("配置尚未加载");
+    expect(result?.reason).toContain("配置未加载");
+    expect(result?.reason).toContain("无交互界面");
+  });
+
+  it("配置未加载：有 UI 时转人工确认，且不创建会话授权（FR-64）", async () => {
+    const harness = setup();
+    harness.runtime.config = undefined;
+
+    const allowed = await harness.engine.decideToolCall(
+      bashEvent("echo hi"),
+      context(harness, { hasUI: true, selectResult: CHOICE_ONCE }),
+    );
+    expect(allowed?.final).toBe("allow");
+    expect(allowed?.source).toBe("human");
+    expect(allowed?.reason).toContain("配置未加载");
+    // 读不到 sessionGrants，不猜：该状态下永远不写授权
+    expect(harness.runtime.grants.keys.size).toBe(0);
+
+    const denied = await harness.engine.decideToolCall(
+      bashEvent("echo hi"),
+      context(harness, { hasUI: true, selectResult: CHOICE_DENY }),
+    );
+    expect(denied?.final).toBe("deny");
+    expect(denied?.source).toBe("human");
+    expect(denied?.reason).toContain("配置未加载");
+  });
+
+  it("配置未加载：仍按 schema 默认 gate 过滤，自定义工具不进裁决（FR-64）", async () => {
+    const harness = setup();
+    harness.runtime.config = undefined;
+
+    const outcome = await harness.engine.decideToolCall(
+      {
+        type: "tool_call",
+        toolName: "mcp__x__y",
+        toolCallId: "call-1",
+        input: { a: 1 },
+      },
+      context(harness, { hasUI: true, selectResult: CHOICE_ONCE }),
+    );
+
+    expect(outcome).toBeUndefined();
+  });
+
+  it("存在失效层且评审不可用时转人工确认，而不是 deny（FR-63）", async () => {
+    // 这是用户报告的原始场景：配置写错 + 未配置 reviewer.model，连内置 read 都被拦。
+    const harness = setup({ global: {}, globalStatus: "degraded" });
+
+    const outcome = await harness.engine.decideToolCall(
+      readEvent("/repo/a.txt"),
+      context(harness, { hasUI: true, selectResult: CHOICE_ONCE }),
+    );
+
+    expect(outcome?.final).toBe("allow");
+    expect(outcome?.source).toBe("human");
+    expect(outcome?.proposed).toBe("ask");
+  });
+
+  it("存在失效层时失败分支按 ask 落点执行；显式 deny 仍优先（FR-63）", async () => {
+    const fallback = setup({ global: {}, globalStatus: "degraded" });
+    const asked = await fallback.engine.decideToolCall(
+      writeEvent("/repo/a.txt"),
+      context(fallback, { hasUI: true, selectResult: CHOICE_ONCE }),
+    );
+    expect(asked?.source).toBe("human");
+
+    const explicitDeny = setup({
+      global: { permission: { write: "review" }, onReviewUnavailable: "deny" },
+      globalStatus: "degraded",
+    });
+    const denied = await explicitDeny.engine.decideToolCall(
+      writeEvent("/repo/a.txt"),
+      context(explicitDeny, { hasUI: true, selectResult: CHOICE_ONCE }),
+    );
+    expect(denied?.final).toBe("deny");
+    expect(denied?.verdict).toBe("unavailable");
   });
 
   it("护栏内部异常也返回 block（§9 最后一行）", async () => {
@@ -778,6 +856,19 @@ describe("决策管线：review 转人工兜底（M3 行为在不可用时的落
 
     expect(outcome?.final).toBe("deny");
     expect(outcome?.reason).toContain("onAskWithoutUI=review");
+  });
+
+  it("失效层里的 yoloMode: true 不会把 ask 落点重写成 allow（D27/FR-63）", async () => {
+    // 失效层不可信：它写的 allow 会被抬为 ask，它写的 yoloMode 也不能反过来把 ask 放开。
+    const harness = setup({ global: { yoloMode: true }, globalStatus: "degraded" });
+
+    const outcome = await harness.engine.decideToolCall(
+      readEvent("/repo/a.txt"),
+      context(harness, { hasUI: true, selectResult: CHOICE_ONCE }),
+    );
+
+    expect(outcome?.final).toBe("allow");
+    expect(outcome?.source).toBe("human");
   });
 
   it("yoloMode 把 ask / review 放行且不调用评审、不弹窗（FR-53）", async () => {

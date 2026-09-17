@@ -168,11 +168,13 @@ agent 读取 `~/.pi/agent/` 下的会话文件，或写入 `../other-project/` �
 | FR-48 | 项目级配置仅当 `ctx.isProjectTrusted()` 为真时加载（与 pi 的信任机制一致） | 未信任项目不加载项目配置 |
 | FR-49 | **输入侧**支持 JSONC：`//` 与 `/* */` 注释、对象/数组末尾多余逗号；字符串字面量内的 `//` 不得被误判为注释 | 带注释与尾逗号的配置可加载；`"a // b"` 这类值保持原样 |
 | FR-50 | 剥离注释后 `JSON.parse` 报出的错误**行列号必须与原文对齐**（被删除注释中的换行原样保留，而非整段丢弃） | 在带注释配置的指定行制造语法错误，报错行号与编辑器显示一致 |
-| FR-51 | 配置解析失败时 fail-closed：把 `allow` 抬升为 `review`，并提示用户配置有误 | 畸形配置下不出现静默放行 |
+| FR-51 | 配置解析失败时 fail-closed：把失效层里的 `allow` 抬升为 `ask`（人工确认，不再是 `review`），并提示用户配置有误与错误定位（见 D26） | 畸形配置下不出现静默放行；抬升只作用于动作取值与模式级抢救，同层显式写的 `deny` 仍保留；抬升后仍有可用字段则该层以 `degraded` 继续生效 |
 | FR-52 | 配置在 `session_start` 与 `before_agent_start` 重新读取，支持 `/perm reload` 手动重载 | 修改配置后无需重启会话 |
-| FR-53 | 提供 `yoloMode`（把所有 `ask` / `review` 重写为 `allow`）作为显式逃生舱，默认 `false`，启用时状态栏显著提示 | 开启后无拦截；状态栏有提示 |
+| FR-53 | 提供 `yoloMode`（把所有 `ask` / `review` 重写为 `allow`）作为显式逃生舱，默认 `false`，启用时状态栏显著提示；`yoloMode` 只由**加载成功**的配置层投票，失效层里写的 `yoloMode: true` 被忽略（D27） | 开启后无拦截；状态栏有提示；失效层里的 `yoloMode: true` 不生效，且健康层显式写的值不受影响 |
 | FR-57 | 使用 zod 作为 schema 唯一真源，并生成 `schemas/guardian.schema.json` 供编辑器补全与实时校验 | 生成的 schema 可通过校验；非法配置给出可定位的错误；提交版 schema 与 zod 生成结果一致 |
 | FR-58 | 仓库内**官方参考配置 `config/config.json` 必须是严格 JSON**（无注释、无尾逗号），并带 `$schema` 指向生成的 schema | `JSON.parse` 直接可解析；编辑器据 `$schema` 提供补全。见决策 D17 |
+| FR-63 | 存在失效层（`ResolvedConfig.degraded`）时，保守落点必须是**可执行的人工确认**：① 未命中用户规则的调用，合成 baseline 的兜底动作与 `ask` 取最严格者（`allow` / `review` → `ask`）；② 评审不可用时落点为 `ask`（仅当 `onReviewUnavailable` 未被任何层提供合法取值；非法值已被逐字段救援丢弃，等价于未设置）。FR-9 只读白名单与对象级 `onUnresolvedFacts` 分支不受影响；失效层也不参与 `yoloMode` 投票（D27），否则 `yoloMode: true` 会把本行的 `ask` 落点整个重写成 `allow` | 失效层 + 未配置 `reviewer.model` 时，`read` / `write` / `bash` 均落 `ask`（有 UI 时出现人工确认对话框），不得落 `deny`；判定理由与对话框均写明“存在失效配置层（配置有误）”；无 UI 时仍按 `onAskWithoutUI`（默认 `deny`）fail-closed |
+| FR-64 | `runtime.config === undefined`（会话未启动，或加载过程抛异常）时，按 schema 默认 `gate`（`side-effect`：pi 内置工具）纳入裁决的调用转人工确认，理由写明“配置未加载”；该状态下不创建会话授权（`sessionGrants` 读不出来，不猜） | 有 UI 时出现人工确认对话框且来源为 `human`；无 UI 时落 `deny`；不产生 grant；不因“读不出配置”把自定义 / MCP 工具拉进裁决 |
 
 ### 6.7 子代理
 
@@ -207,7 +209,7 @@ agent 读取 `~/.pi/agent/` 下的会话文件，或写入 `../other-project/` �
 | **D4** | 覆盖面：`bash`/`powershell`、`write`/`edit`、`read`/`find`/`grep`/`ls`、`external_directory`、子代理 | `read` 面纳入是因为"外部目录读取"是真实的信息泄露面（`~/.ssh`、`.env`、认证文件），而它不写任何东西，单看写操作面很容易漏掉 |
 | **D5** | 跨层合并用最严格者胜，顺序 **`deny > ask > review > allow`** | `ask` 排在 `review` 之前，因为"用户要求亲自确认"比"交给模型判断"更保守；`review` 让模型有拒绝能力，因此比 `allow` 严格 |
 | **D6** | 评审模型只能来自 pi 模型配置文件，通过 model registry 解析，并沿用该模型配置的接口协议；不回退到当前会话模型 | 审查主体必须独立配置；插件不自行选择 wire API、不覆盖认证/headers，避免配置文件与真实请求协议漂移 |
-| **D7** | 评审不可用时 **fail-closed（默认 `deny`）** | `unavailable` 是基础设施结果，不是安全结论。放行等于让"拔网线"成为绕过手段。三个失败分支开关（`onReviewUnavailable` / `onUnresolvedFacts` / `onAskWithoutUI`）默认分别为 `deny` / `review` / `deny`，但**允许显式配 `allow`**（用户决策：离线环境可能需要）；需要整体放宽护栏时仍推荐用 `yoloMode`（会写审计日志并在状态栏显著提示），而不是就地埋一个静默放行开关 |
+| **D7** | 评审不可用时 **fail-closed（默认 `deny`）** | `unavailable` 是基础设施结果，不是安全结论。放行等于让"拔网线"成为绕过手段。三个失败分支开关（`onReviewUnavailable` / `onUnresolvedFacts` / `onAskWithoutUI`）默认分别为 `deny` / `review` / `deny`，但**允许显式配 `allow`**（用户决策：离线环境可能需要）；需要整体放宽护栏时仍推荐用 `yoloMode`（会写审计日志并在状态栏显著提示），而不是就地埋一个静默放行开关。**例外**：存在失效层且 `onReviewUnavailable` 未被任何层显式设置时，落点回退为 `ask`（D26、FR-63） |
 | **D8** | 启用全部降本机制：会话授权记忆、判定缓存、熔断器、审计日志、非阻塞预评分 | 前四项是"减少人工介入开销"的直接手段；预评分因其"先放行、后判定"的实际语义与护栏的保守取向相反，**默认关闭**，由用户显式开启 |
 | **D9** | 交付物分两份：需求文档 + 架构设计文档 | 先对齐"做什么"，再对齐"怎么做"；实施计划另行产出 |
 | **D10** | 参考源码拉取到项目内 `reference/` 并加入 `.gitignore`；插件从一开始按 **pi package** 组织 | `reference/` 便于离线查阅且不污染仓库；package 形态保证依赖声明（tree-sitter-bash、zod）与分发路径从第一天就正确 |
@@ -226,6 +228,8 @@ agent 读取 `~/.pi/agent/` 下的会话文件，或写入 `../other-project/` �
 | **D23** | 只有人工确认才能创建会话授权 | 模型 allow、缓存和自动审核都不等于用户授权；避免把模型判断放大为本会话内长期放行 |
 | **D24** | `!command` / `!!command` 纳入 `user_bash` 护栏；`userBashPolicy` 默认开启，自动审核默认开启，模型缺省复用 `reviewer.model`；检测到其他拦截器冲突时只提示，不强制顺序 | 用户直接执行不再形成默认绕过通道；共存冲突可见，同时避免插件争抢扩展加载顺序 |
 | **D25** | 新增 `subagentPolicy`：子代理默认动作可取 `deny` / `ask` / `review`，默认 `review`，默认不允许会话授权继承或创建；v1 只兼容 `@gotgenes/pi-subagents` v21.7.1，且护栏缺失时必须告警 | 子代理会话与父会话状态隔离，并可用更保守的默认策略运行；兼容范围与未覆盖风险保持显式 |
+| **D26** | **配置不可信时的保守落点是 `ask`（人工确认），不是 `review` 或 `deny`**：① 失效层里 `allow` 抬升为 `ask`；② 存在失效层时 baseline 兜底动作与 `ask` 取最严格者（`allow` / `review` → `ask`）；③ 评审不可用且 `onReviewUnavailable` 未提供合法取值时落 `ask`；④ 配置未加载（`runtime.config === undefined`）时同样转人工（无 UI 时 `deny`） | 人工是唯一**不依赖配置内容**的判定来源。原设计选 `review` 的前提是“评审可用”，而评审依赖同一份可能已读坏的 `reviewer.model`；一旦评审不可用，落点就退化成 `deny`，把“配置写错”变成“无差别拦截”，且理由指向评审模型、与被拦原因无关（已实测：失效层 + 未配置 `reviewer.model` 时连内置 `read` 都被拦）。`ask` 在严格度序 `deny > ask > review > allow` 里比 `review` 更严格，因此仍是 fail-closed（不会静默放行），只是把**不可执行的 deny** 换成**可执行的 ask**。代价：配置一坏就逐次人工确认（响亮，直到修好或用 `yoloMode`） |
+| **D27** | **失效层不参与 `yoloMode` 投票**：合成时只采纳 `status=loaded` 层的显式取值；失效层里写的 `yoloMode: true` 被忽略（健康层显式写的值不受影响，健康层之间仍按“更具体的层覆盖”） | 与 FR-51 同向：失效层里写的 `allow` 会被抬为 `ask`（不许放宽），却会因为同一层里的 `yoloMode: true` 被反向放开，两个方向直接抵消——实测失效层（JSON 合法但校验失败）+ `yoloMode: true` 时，内置 `read` 会回到 `final=allow, source=policy`（静默放行）。把这个最强的放宽开关从“不可信层”的输入里拿掉，与“三个失败分支开关在失效层里的 `allow` 也要抬升”是同一个理由 |
 
 ## 8. 约束与已知限制
 
@@ -291,6 +295,7 @@ agent 读取 `~/.pi/agent/` 下的会话文件，或写入 `../other-project/` �
 | ~~Q4~~ | ~~审计日志是否需要轮转与保留策略？~~ **已确认（2026-09-16）**：按日切分，默认保留 14 天，可配置，见 FR-43 / D20 | — |
 | ~~Q5~~ | ~~是否需要"只读命令白名单"的内置默认集？~~ **已确认（2026-09-16）**：内置一小组高置信命令；显式数组完整覆盖，见 FR-9 / D21 | — |
 | ~~Q6~~ | ~~插件标识符命名~~ **已确认（2026-09-16）**：见下表 | — |
+| ~~Q7~~ | ~~失效层里显式写的 `yoloMode: true` 会被原样抢救，从而把 D26 的 `ask` 落点重写为 `allow`~~ **已确认（2026-01）**：选收紧——失效层不参与 `yoloMode` 投票，见 FR-53 / D27 | — |
 
 ### 命名定稿（2026-09-16）
 
@@ -314,3 +319,4 @@ agent 读取 `~/.pi/agent/` 下的会话文件，或写入 `../other-project/` �
 3. **可解释**：每次拦截都能回答"命中了哪条规则"或"模型给出的理由是什么"。
 4. **可关闭**：`/perm off` 后立即恢复到无护栏行为，且开关状态可见。
 5. **可自检**：`/perm status` 能完整回答"当前规则集是什么、评审是否可用、tree-sitter 是否就绪"，不依赖查阅文档。
+6. **不无差别拦截**：配置不可信（失效层 / 未加载）时，保守落点必须落在**可执行**的人工确认上；只有无 UI 或用户显式配置时才允许落 `deny`。配置错误不得表现为"所有工具调用被拦"，也不得把理由写成与真实原因无关的评审失败。

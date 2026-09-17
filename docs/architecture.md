@@ -192,6 +192,11 @@ tool_call(event, ctx)
  │
  ├─ 0. 熔断已触发？（本轮）──是──► { block: true, terminate: true, reason }（本轮提前结束）
  │
+ ├─ 0.5 config 已加载？（runtime.config）
+ │      未加载 ──► 按 schema 默认 gate（side-effect）纳入裁决的调用 ──► ask
+ │                （人工确认；无 UI 时 deny，且不创建会话授权；FR-64）
+ │                未纳入 ──► return undefined
+ │
  ├─ 1. classify(toolName) ─► surfaces[]        (bash | read | write | tool | ...)
  │
  ├─ 2. extractFacts(event) ─► Facts            (可能带 unresolved 标记)
@@ -206,6 +211,7 @@ tool_call(event, ctx)
  ├─ 4. 规则求值 evaluate(facts) ─► 各对象的 action
  │      用户规则未命中时：只读白名单 ──► allow（FR-9）；
  │        不可静态确定的对象 ──► onUnresolvedFacts；其余 ──► defaultAction（surface 矩阵）
+ │        存在失效层时：surface 矩阵那一层的兜底动作抬到 ask（allow / review → ask，FR-63）
  │        子代理会话在 subagentPolicy.enabled 时把 surface 矩阵那一层的动作抬到
  │        subagentPolicy.defaultAction（取最严格者，只收紧；见 §8.5）
  │      若存在 unresolved 且至少一个可信对象明确 deny ──► ask
@@ -508,9 +514,13 @@ baseline 的具体内容（`DEFAULT_ACTION_MATRIX`，§6.4）：
 - 逐 surface 一条 `*` 规则；`read`/`find`/`grep`/`ls` 为 `allow`，其余为 `review`。
 - `path_read` / `path_write` **刻意不合成**：它们是叠加项（只描述路径约束），定默认值会让每次带路径的调用都被路径面投一票，定成 `review` 就直接推翻 `read` 的默认 `allow`。不命中就不表态。
 - **不合成** `*` surface 的兜底规则（同理会把叠加面一起兜住）；未识别 / 自定义工具由 `tool` 哨兵 surface 负责（§6.4 末行）。
-- 存在失效层（`degraded`）时，合成直接把 `allow` 抬升为 `review`（FR-51、configuration.md §3），不靠求值器额外记一个"配置有坏层"的开关。
+- 存在失效层（`degraded`）时，合成把兜底动作与 `ask` 取最严格者：原本 `allow` 的 surface 变成 `ask`，原本 `review` 的也变成 `ask`（FR-51/FR-63、configuration.md §3）。
+- 同一合成步骤里，若存在失效层且 `onReviewUnavailable` 未被任何层提供合法取值（写成枚举外的值等价于未设置），其取值也回退为 `ask`。这两件事都落在合成结果里，不靠求值器额外记一个"配置有坏层"的开关。
+- `yoloMode` 只采纳 `status=loaded` 层的显式取值（D27/FR-63）：失效层不可信，同一层里写的 `allow` 已经被抬成 `ask`，不能让它写的 `yoloMode: true` 再把 `ask` 整个放开；健康层显式写的值不受影响。
 
-失败降级（FR-51）：非 global 层解析失败时，把该层的**所有 `allow` 抬升为 `review`**，并 `notify` 用户。选择 `review` 而非 `ask` 的理由是：配置损坏时不该打断工作流，但也不该静默放行，模型复查正好落在这个区间。
+失败降级（FR-51/FR-63）：非 global 层解析失败时，把该层的**所有 `allow` 抬升为 `ask`**，并 `notify` 用户。
+
+这里的落点选择在 D26 修正过一次：原设计选 `review`，理由是“配置损坏时不该打断工作流，但也不该静默放行，模型复查正好落在这个区间”。这个理由的前提是**评审可用**，而失效层恰恰可能丢掉 `reviewer.model`（`reviewer` 是 `strictObject`，段内任一字段写错就会整段被抢救掉）；一旦评审不可用，`review` 就按 `onReviewUnavailable`（默认 `deny`）落成 `deny`，把“配置写错”变成“无差别拦截”，而且拦截理由指向评审模型、与真实原因无关。改为 `ask` 后，落点选在**唯一不依赖配置内容**的判定来源（人工）：`ask` 比 `review` 更严格，因此仍是 fail-closed，只是把不可执行的 `deny` 换成可执行的 `ask`。
 
 ### 6.2 规则表结构
 
@@ -576,11 +586,11 @@ surface 匹配：`rule.surface === 对象的 surface` 或 `rule.surface === "*"`
 
 | 配置段 | 职责 | 关键约束 |
 |---|---|---|
-| `enabled` / `yoloMode` / `auditLog` / `debugLog` | 总开关、逃生舱、日志级别 | `yoloMode=true` 时所有 `ask`/`review` 重写为 `allow`，状态栏必须显著提示（FR-53）；审计日志按日切分并默认保留 14 天 |
+| `enabled` / `yoloMode` / `auditLog` / `debugLog` | 总开关、逃生舱、日志级别 | `yoloMode=true` 时所有 `ask`/`review` 重写为 `allow`，状态栏必须显著提示（FR-53）；失效层不参与 `yoloMode` 投票（D27）；审计日志按日切分并默认保留 14 天 |
 | `gate` / `extraTools` | 评估范围（architecture §4.0） | `side-effect` 覆盖全部 pi 内置工具；自定义/MCP 工具需 `all` 或 `extraTools` |
-| `onReviewUnavailable` / `onUnresolvedFacts` / `onAskWithoutUI` | 三个失败分支的动作（§9） | 默认分别为 `deny` / `review` / `deny`；可配 `allow` / `deny` / `ask` / `review`（D7：默认 fail-closed，`allow` 是显式例外） |
+| `onReviewUnavailable` / `onUnresolvedFacts` / `onAskWithoutUI` | 三个失败分支的动作（§9） | 默认分别为 `deny` / `review` / `deny`；可配 `allow` / `deny` / `ask` / `review`（D7：默认 fail-closed，`allow` 是显式例外）；存在失效层且 `onReviewUnavailable` 未被任何层显式设置时，合成结果回退为 `ask`（FR-63） |
 | `onMixedCommandActions` | 同一 shell 调用跨命令单元出现 `allow` / `deny` 冲突时的调用级动作 | 默认 `deny`，可选 `ask` / `review` / `deny`；global/default 定义基线，project 只能收紧 |
-| `reviewer` | 评审模型、推理强度、deadline、证据循环、风险门槛 | `model` 必填；`maxAllowRiskLevel` 实现 FR-23；`reasoningEffort` 默认 `null`（不发送推理参数） |
+| `reviewer` | 评审模型、推理强度、deadline、证据循环、风险门槛 | `model` 未配置或无法解析 ⇒ `unavailable`（FR-19）；`maxAllowRiskLevel` 实现 FR-23；`reasoningEffort` 默认 `null`（不发送推理参数） |
 | `userBashPolicy` | 用户直接执行 `!command` / `!!command` 的开关、自动审核、模型与推理强度 | 跨层时 `enabled=true` 和 `autoReview=false` 优先；模型与推理强度可显式覆盖；deny 使用替代 `BashResult` 阻断 |
 | `classifier` | 非阻塞预评分 | `enabled` 默认 `false`（D8）；推理强度独立于评审，默认不发送 |
 | `circuitBreaker` | 同轮连续/窗口内拒绝阈值 | 阈值 0 表示关闭该条件 |
@@ -623,7 +633,7 @@ surface 匹配：`rule.surface === 对象的 surface` 或 `rule.surface === "*"`
 | **行号对齐**（FR-50） | 被删除的注释中的换行原样保留（行注释替换为一个 `\n`，块注释替换为等量换行） | 漏写引号却报错在十几行之外，配置几乎无法手改 |
 | 尾逗号仅在 `}` / `]` 前消除 | `,` 后跳空白与注释，再看是否紧跟 `}`/`]` | 误删正常的元素分隔逗号 |
 
-解析失败时除了 `JSON.parse` 的原始错误，还要输出错误位置附近的原文片段与所在层（全局/项目），否则用户无从下手（FR-51）。
+解析失败时除了 `JSON.parse` 的原始错误，还要输出错误位置附近的原文片段与所在层（全局/项目），否则用户无从下手（FR-51）；同时保守落点交给人工确认（FR-63），而不是依赖可能已被抢救掉的评审模型。
 
 ## 7. 评审器设计
 
@@ -759,7 +769,7 @@ verdict schema：
 | `allow` | 不超过 `reviewer.maxAllowRiskLevel`（默认 `medium`） | 放行（`source: "reviewer"`） |
 | `allow` | 超过门槛 | **不直接放行** → `ask`（无 UI 则 `onAskWithoutUI`） |
 | `deny` | 任意 | 拦截 + 反规避条款 |
-| `unavailable` | — | `onReviewUnavailable` |
+| `unavailable` | — | `onReviewUnavailable`（存在失效层且该字段未被显式设置时回退为 `ask`，FR-63） |
 
 这道门槛的作用是：不把"最终授权"完全交给一个可能给出低质量 allow 的模型，且代价只是多一次交互。门槛是配置值（`reviewer.maxAllowRiskLevel`），不是硬编码。
 
@@ -773,6 +783,8 @@ verdict schema：
 | `ask` | 转人工确认（无 UI 时再由 `onAskWithoutUI` 接手） |
 | `allow` | 放行，但理由里显式标明“本次放行由配置决定，不是评审结论”（D7） |
 | `review` | 按 `deny` 处理：评审已经不可用，“再评审一次”不是一个可执行的落点 |
+
+**默认值的回退（D26 / FR-63）**：“默认 `deny`”的前提是“评审本来应该能用，但它挂了”。如果当前存在失效层，那么这个前提本身就不成立——`reviewer.model` 很可能就是被抢救掉的那一项。因此当 `degraded` 且 `onReviewUnavailable` 未被任何层提供合法取值（写成枚举外的值等价于未设置）时，合成结果直接把该字段定为 `ask`，让它走与 `ask` 完全相同的人工路径；显式写过的合法取值（含 `deny` / `allow` / `review`）不受此回退影响。这是一次**默认值的修正**，不是对用户显式决定的覆盖。
 
 ## 8. 降本机制
 
@@ -863,7 +875,11 @@ key = sha256([
 | 同一调用同时出现 `unresolved` 和明确 `deny` | `ask` | — | 说明哪些对象无法静态确定、哪些对象明确拒绝（FR-61） |
 | 同一 shell 调用跨命令单元同时出现 `allow` / `deny` | `deny` | `onMixedCommandActions` | 列出冲突的命令单元、各自的裁决与命中规则 |
 | 需要人工确认且无 UI | `deny` | `onAskWithoutUI` | 说明"无交互界面可确认" |
-| 配置解析失败 | `allow` 抬升为 `review` | — | 提示用户配置有误并给出错误定位 |
+| 配置解析失败 | 失效层 `allow` 抬升为 `ask`（不再是 `review`） | — | 提示用户配置有误并给出错误定位 |
+| 存在失效层时未命中用户规则 | `ask` | — | 说明“存在失效配置层（配置有误）”，并提示修好后 `/perm reload` |
+| 存在失效层且评审不可用 | `ask` | `onReviewUnavailable`（显式设置时优先） | 同上一行；不得把理由写成与真实原因无关的评审失败 |
+| 配置未加载（`runtime.config === undefined`） | `ask`；无 UI 时 `deny` | — | 说明“配置未加载（会话未启动或加载失败）” |
+| 失效层里写的 `yoloMode: true` | 忽略（不参与投票） | — | 与 FR-51 同向：失效层不许放宽（D27） |
 | `user_bash` 裁决为 `deny` | 返回替代 `BashResult`（`exitCode: 1`） | — | 与 `tool_call` 同源理由 + 反规避条款（FR-26/60） |
 | `user_bash` 裁决为 `review` 但 `autoReview=false` | `ask` | `userBashPolicy.autoReview` | 说明"用户手输命令不交评审模型，转人工确认" |
 | 共存声明发布失败 | 只 `console.warn` | — | 共存检测是 best-effort，不能影响护栏本身 |
@@ -873,7 +889,7 @@ key = sha256([
 
 最后一条特别重要：pi 对 `tool_call` handler 抛错的处理是**阻断该工具**（fail-safe），但我们不应依赖这一行为，而要在管线最外层显式 `try/catch` 并返回带诊断信息的 `{block: true}`。
 
-三个失败分支开关（`onReviewUnavailable` / `onUnresolvedFacts` / `onAskWithoutUI`）默认 fail-closed，但**允许显式配 `allow`**（D7）：用户确实可能需要"评审不可用时放行"（例如离线环境）。它会被当作普通配置值处理并在审计日志里留痕；插件不额外警告。整体放宽护栏时仍推荐用 `yoloMode`（会写审计日志并在状态栏显著提示），而不是就地埋一个静默开关。
+三个失败分支开关（`onReviewUnavailable` / `onUnresolvedFacts` / `onAskWithoutUI`）默认 fail-closed，但**允许显式配 `allow`**（D7）：用户确实可能需要"评审不可用时放行"（例如离线环境）。它会被当作普通配置值处理并在审计日志里留痕；插件不额外警告。整体放宽护栏时仍推荐用 `yoloMode`（会写审计日志并在状态栏显著提示），而不是就地埋一个静默开关。**唯一的默认值例外**（D26 / FR-63）：存在失效层且 `onReviewUnavailable` 未被任何层显式设置时，该字段的默认值回退为 `ask`——失效层里可能原本就写着 `deny`，但也可能正是丢掉 `reviewer.model` 的那一层，此时 `deny` 只会把“配置写错”伪装成风险拦截。
 
 ## 10. 观测性
 

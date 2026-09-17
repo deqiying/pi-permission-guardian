@@ -124,6 +124,7 @@ Schema：[`schemas/guardian.schema.json`](schemas/guardian.schema.json)。
 - **`user_bash` 共存只提示不接管**：检测到其他拦截器的声明冲突时会提示，但不调整加载顺序；未参与声明的先前拦截器属于不可观测边界。
 - **子代理兼容范围**：v1 只对接 `@gotgenes/pi-subagents` v21.7.1；无法识别子代理会话时保持父策略并告警，`/perm status` 标为 `unguarded`。
 - **审计日志异步落盘**：`record()` 只入队，`session_shutdown` 才 flush；进程被强杀时尾部条目可能缺失（影响可追溯性，不影响裁决）。
+- **配置失效时逐次人工确认**：存在失效配置层（或配置根本没加载出来）时，保守落点是 `ask`（人工确认），不是 `review` / `deny`（D26 / FR-51 / FR-63 / FR-64）。原设计选 `review` 的前提是“评审可用”，而评审依赖同一份可能已读坏的 `reviewer.model`；一旦评审不可用，落点就退化成 `deny`，写错一个字段就会让内置 `read` 也被拦，且理由指向评审模型。代价是修好配置前每次调用都要确认（修好后用 `/perm reload` 重载）；失效层里写的 `yoloMode: true` 不生效（D27），否则它会把这个人工确认落点又放开。
 
 ## 验证状态
 

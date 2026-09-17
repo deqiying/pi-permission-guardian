@@ -16,9 +16,9 @@ import { parseJsonc } from "./jsonc.ts";
  *
  * 每层独立读取与校验，再交给 `merge.ts` 合并。任何一层的失败都不会让插件"静默放行"：
  * - JSON 语法错误（读不出任何字段）：该层不参与合并，报出原文行列号。
- * - JSON 合法但校验失败：按 FR-51 把 `permission` 里的 `allow` 抬升为 `review`，再逐字段 / 逐 surface / 逐规则抢救；
+ * - JSON 合法但校验失败：按 FR-51 把 `permission` 里的 `allow` 抬升为 `ask`，再逐字段 / 逐 surface / 逐规则抢救；
  *   合法部分继续生效，非法部分被忽略并逐条记录。
- * 两种情况都会把 `ResolvedConfig.degraded` 置真，策略层据此把未命中规则的默认动作收紧到保守侧。
+ * 两种情况都会把 `ResolvedConfig.degraded` 置真，合成 baseline 与策略层据此把保守落点改为人工确认（FR-51/FR-63）。
  */
 
 export interface LoadConfigOptions {
@@ -113,7 +113,7 @@ function loadLayer(layer: "global" | "project", path: string): LoadedLayer {
 }
 
 /**
- * FR-51 的降级路径：把该层所有 `allow` 抬升为 `review`，再逐层抢救。
+ * FR-51 的降级路径：把该层所有 `allow` 抬升为 `ask`，再逐层抢救。
  *
  * 关键点是不能因为一个字段写错就丢掉整层：那会连带丢掉用户显式写的 `deny` 规则，
  * 反而比坏配置更不安全。抢救粒度依次为**顶层字段 → surface → 单条模式规则**，
@@ -209,7 +209,7 @@ function degradeLayer(
   diagnostics.push({
     layer,
     path,
-    message: "已把该层所有 allow 抬升为 review，其余合法字段继续生效（FR-51）",
+    message: "已把该层所有 allow 抬升为 ask（人工确认），其余合法字段继续生效（FR-51）",
   });
   return {
     layer,
@@ -287,6 +287,12 @@ function validSurface(surface: string, value: unknown): boolean {
 /**
  * 抬升一个失效层里的 `allow`：只碰动作取值与这三类位置。
  *
+ * 抬升目标是 `ask`（人工确认）而不是 `review`（D26 / FR-63）：失效层不可信，
+ * 而“交给评审模型复查”同样依赖配置——`reviewer` 是 strictObject，段内任一字段写错就整段被
+ * 抢救掉，`review` 只会落成 `onReviewUnavailable`（默认 `deny`），把配置错误变成无差别拦截。
+ * 人工是唯一不依赖配置内容的判定来源，而 `ask` 在 `deny > ask > review > allow` 里比 `review`
+ * 更严格，因此仍然是 fail-closed，不会变成静默放行。
+ *
  * 为什么连三个失败分支开关一起抬升：它们是"放宽护栏"的入口（配 `allow` 等于"评审不可用时放行"），
  * 而一个读不完整的配置层不可信 —— 它可能原本还写了更严的值。这和 §3 里"未命中规则的默认动作按
  * 保守侧处理"是同一个理由，因此不区分"规则里的 allow"与"标量里的 allow"。
@@ -302,7 +308,7 @@ function elevateAllows(raw: Record<string, unknown>): Record<string, unknown> {
   }
   for (const key of FAILURE_BRANCH_KEYS) {
     if (next[key] === "allow") {
-      next[key] = "review";
+      next[key] = "ask";
     }
   }
   return next;
@@ -323,14 +329,14 @@ const FAILURE_BRANCH_KEYS = [
  */
 function elevateSurfaceValue(value: unknown): unknown {
   if (value === "allow") {
-    return "review";
+    return "ask";
   }
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return value;
   }
   const record = value as Record<string, unknown>;
   if (isActionValueShape(record)) {
-    return record["action"] === "allow" ? { ...record, action: "review" } : value;
+    return record["action"] === "allow" ? { ...record, action: "ask" } : value;
   }
   const next: Record<string, unknown> = {};
   for (const [pattern, ruleValue] of Object.entries(record)) {

@@ -74,8 +74,10 @@ export interface ResolvedConfig extends Omit<GuardianConfig, "permission"> {
   /**
    * 至少一层配置不可用（FR-51）。
    *
-   * 为真时未命中规则的**默认动作**必须按保守侧处理（`allow` → `review`），
-   * 因为损坏的配置里可能原本存在 `deny` 规则，我们无法读出来。
+   * 为真时未命中规则的**默认动作**按保守侧处理：合成 baseline 把兜底动作抬到“至少 `ask`”
+   * （`allow` / `review` → `ask`），因为损坏的配置里可能原本存在 `deny` 规则，我们无法读出来。
+   * 落点选 `ask` 而不是 `review` 的理由见 FR-63 / D26：`review` 依赖同一份可能已读坏的配置。
+   * 同时该状态下若没有任何层显式设置 `onReviewUnavailable`，它也会回退为 `ask`。
    */
   degraded: boolean;
   /** 用户层（global + project）的规则条数，不含 baseline 合成规则。 */
@@ -222,6 +224,20 @@ export function mergeLayers(layers: readonly LoadedLayer[]): ResolvedConfig {
   const merged = guardianConfigSchema.parse(scalars);
 
   if (contributing.length > 0) {
+    // `yoloMode` 只由**加载成功**的层投票（D27 / FR-63）。
+    //
+    // 失效层不可信，所以不能从它那里接受“放宽”：同一份读不完整的配置里，`allow` 会被抬为 `ask`
+    // （FR-51），而 `yoloMode: true` 却会把整个 `ask` 落点重写成 `allow`，两个方向互相抵消。
+    // 这里保留“更具体的层覆盖”的原有顺序，只把失效层排除在外；健康层里用户显式写的值不受影响。
+    let yoloMode = DEFAULTS.yoloMode;
+    for (const layer of contributing) {
+      if (layer.status !== "loaded" || !rawHasTop(layer, "yoloMode")) {
+        continue;
+      }
+      yoloMode = layer.raw["yoloMode"] === true;
+    }
+    merged.yoloMode = yoloMode;
+
     // 调用级冲突策略（FR-59、architecture §4.2）：基线 = 全局层的显式取值，全局层没写就是 `deny`；
     // 项目层只能在此基础上按 deny > ask > review 收紧。
     // 基线始终参与比较，因此只写了项目层 `review` 不能把默认或全局的 `deny` 放宽。
@@ -306,6 +322,14 @@ export function mergeLayers(layers: readonly LoadedLayer[]): ResolvedConfig {
   const degraded = layers.some(
     (layer) => layer.status === "degraded" || layer.status === "invalid",
   );
+
+  // FR-63 / D26：失效层可能正是丢掉 `reviewer.model` 的那一层，“评审不可用”在这里是配置损坏的
+  // 后果，不是风险结论。因此当没有任何层显式设置该字段时，连同默认值一起回退为 `ask`。
+  // 这是一次**默认值**修正，不是对用户显式决定的覆盖：只要有一层写过就用它抢救后的值
+  // （失效层里写的 `allow` 已被 `elevateAllows` 抬为 `ask`）。
+  if (degraded && explicitTopVotes(contributing, "onReviewUnavailable").length === 0) {
+    merged.onReviewUnavailable = "ask";
+  }
 
   // baseline 在最前（§6.1 的合成顺序）：表里第一条就是"什么都没有命中时"的兜底，
   // 但与用户层语义不同 —— 求值器只在用户层全未命中时才让它参与（见 buildBaselineRules）。

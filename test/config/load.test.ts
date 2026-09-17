@@ -279,7 +279,7 @@ describe("配置加载与合并（FR-47/48/51/52）", () => {
     expect(config.subagentPolicy.defaultAction).toBe("ask");
   });
 
-  it("配置校验失败：抬升 allow 为 review 并逐字段抢救（FR-51）", () => {
+  it("配置校验失败：抬升 allow 为 ask 并逐字段抢救（FR-51）", () => {
     const ws = newWorkspace();
     writeGlobalConfig(
       ws,
@@ -304,15 +304,15 @@ describe("配置加载与合并（FR-47/48/51/52）", () => {
       "以下字段不合法已被忽略：debugLog",
     );
     expect(config.layers.global.diagnostics.at(-1)?.message).toContain(
-      "抬升为 review",
+      "抬升为 ask",
     );
 
     // 合法字段继续生效（否则用户显式写的 deny 会一起丢失）
     expect(layerRules(config, "global")?.surfaces.get("read")).toEqual([
-      { pattern: "*", action: "review", index: 0 },
+      { pattern: "*", action: "ask", index: 0 },
     ]);
     expect(layerRules(config, "global")?.surfaces.get("bash")?.map((rule) => rule.action)).toEqual([
-      "review",
+      "ask",
       "deny",
     ]);
     // 非法字段被丢弃，落到 schema 默认值
@@ -384,9 +384,10 @@ describe("配置加载与合并（FR-47/48/51/52）", () => {
       "review",
       "deny",
     ]);
-    // read 的 allow 被抬升，而不是被丢掉
+    // 抬升只针对 allow：显式写的 review 保留，评审不可用时再由 onReviewUnavailable 的
+    // 默认值回退为 ask（FR-63 ③）。
     expect(layerRules(config, "global")?.surfaces.get("read")).toEqual([
-      { pattern: "*", action: "review", index: 0 },
+      { pattern: "*", action: "ask", index: 0 },
     ]);
   });
 
@@ -475,7 +476,9 @@ describe("配置加载与合并（FR-47/48/51/52）", () => {
     const config = load(ws);
 
     expect(config.layers.global.status).toBe("degraded");
-    expect(config.onReviewUnavailable).toBe("deny");
+    // 枚举外的值等价于“未提供合法取值”：字段被丢弃，于是 onReviewUnavailable 连默认值一起
+    // 回退为 ask（FR-63）；onUnresolvedFacts 的默认值本身是 review，没有回退一说。
+    expect(config.onReviewUnavailable).toBe("ask");
     expect(config.onUnresolvedFacts).toBe("review");
     expect(
       config.layers.global.diagnostics.some((diagnostic) =>
@@ -508,7 +511,7 @@ describe("配置加载与合并（FR-47/48/51/52）", () => {
     expect(config.layers.global.diagnostics[0]?.snippet).toBe('  "debugLog": nope');
   });
 
-  it("非法动作值不会被放行，而是降级为 review（FR-51）", () => {
+  it("非法动作值不会被放行，而是被丢弃（FR-51）", () => {
     const ws = newWorkspace();
     writeGlobalConfig(
       ws,
@@ -569,7 +572,7 @@ describe("baseline 合成规则（FR-8、§6.4）", () => {
     expect(config.rules[0]?.surfaces.get("tool")?.[0]?.action).toBe("review");
   });
 
-  it("存在失效层时把默认动作里的 allow 抬升为 review（FR-51）", () => {
+  it("存在失效层时把兜底动作抬到 ask（allow 与 review 都抬，FR-51/FR-63）", () => {
     const ws = newWorkspace();
     // 项目层 JSON 语法错误 ⇒ degraded
     writeGlobalConfig(ws, JSON.stringify({ permission: { read: "allow" } }));
@@ -580,21 +583,78 @@ describe("baseline 合成规则（FR-8、§6.4）", () => {
     expect(config.degraded).toBe(true);
     // 用户显式写的规则不受影响
     expect(layerRules(config, "global")?.surfaces.get("read")?.[0]?.action).toBe("allow");
-    // 但兑底不再用 allow
-    for (const surface of ["read", "find", "grep", "ls"]) {
+    // 兜底不再用 allow，也不再用 review：review 依赖同一份可能已读坏的配置（reviewer.model）
+    for (const surface of [
+      "read",
+      "find",
+      "grep",
+      "ls",
+      "write",
+      "edit",
+      "bash",
+      "powershell",
+      "external_directory_read",
+      "external_directory_write",
+      "tool",
+    ]) {
       expect(config.rules[0]?.surfaces.get(surface)?.[0]).toMatchObject({
-        action: "review",
-        reason: "配置存在失效层，默认动作收紧为 review",
+        action: "ask",
+        reason: "配置存在失效层（配置有误），兜底动作改为人工确认",
       });
     }
-    expect(config.rules[0]?.surfaces.get("bash")?.[0]).toMatchObject({
-      // 本来就 review 的 surface 没变过，不该挂“已收紧”的理由
-      action: "review",
-      reason: "默认动作矩阵",
-    });
   });
 
-  it("失效层里的失败分支开关 allow 也被抬升为 review（FR-51）", () => {
+  it("存在失效层时 onReviewUnavailable 的默认值回退为 ask，显式取值优先（FR-63）", () => {
+    // ① 未设置 ⇒ 默认值回退
+    const unset = newWorkspace();
+    writeGlobalConfig(unset, JSON.stringify({ debugLog: "yes" }));
+    expect(load(unset).onReviewUnavailable).toBe("ask");
+
+    // ② 显式 deny ⇒ 仍然优先（默认值回退不覆盖用户显式决定）
+    const explicitDeny = newWorkspace();
+    writeGlobalConfig(
+      explicitDeny,
+      JSON.stringify({ debugLog: "yes", onReviewUnavailable: "deny" }),
+    );
+    expect(load(explicitDeny).onReviewUnavailable).toBe("deny");
+
+    // ③ 另一层显式设置也算显式
+    const crossLayer = newWorkspace();
+    writeGlobalConfig(crossLayer, JSON.stringify({ onReviewUnavailable: "deny" }));
+    writeProjectConfig(crossLayer, JSON.stringify({ debugLog: "yes" }));
+    expect(load(crossLayer, true).onReviewUnavailable).toBe("deny");
+
+    // ④ 健康配置下不会回退
+    const healthy = newWorkspace();
+    writeGlobalConfig(healthy, JSON.stringify({}));
+    expect(load(healthy).onReviewUnavailable).toBe("deny");
+  });
+
+  it("存在失效层时 yoloMode 只由加载成功的层投票（D27/FR-63）", () => {
+    // ① 失效层里的 yoloMode: true 被忽略：否则它会把兜底的 ask 重写成 allow
+    const degradedOnly = newWorkspace();
+    writeGlobalConfig(degradedOnly, JSON.stringify({ yoloMode: true, debugLog: "yes" }));
+    const ignored = load(degradedOnly);
+    expect(ignored.layers.global.status).toBe("degraded");
+    expect(ignored.degraded).toBe(true);
+    expect(ignored.yoloMode).toBe(false);
+
+    // ② 健康层里用户显式写的 true 仍生效
+    const healthyYolo = newWorkspace();
+    writeGlobalConfig(healthyYolo, JSON.stringify({ yoloMode: true }));
+    writeProjectConfig(healthyYolo, JSON.stringify({ debugLog: "yes" }));
+    const kept = load(healthyYolo, true);
+    expect(kept.degraded).toBe(true);
+    expect(kept.yoloMode).toBe(true);
+
+    // ③ 健康层之间仍是“更具体的层覆盖”（原有顺序不变）
+    const healthyOverride = newWorkspace();
+    writeGlobalConfig(healthyOverride, JSON.stringify({ yoloMode: true }));
+    writeProjectConfig(healthyOverride, JSON.stringify({ yoloMode: false }));
+    expect(load(healthyOverride, true).yoloMode).toBe(false);
+  });
+
+  it("失效层里的失败分支开关 allow 也被抬升为 ask（FR-51）", () => {
     const ws = newWorkspace();
     writeGlobalConfig(
       ws,
@@ -609,8 +669,8 @@ describe("baseline 合成规则（FR-8、§6.4）", () => {
 
     expect(config.layers.global.status).toBe("degraded");
     // 读不完整的层不可信：它可能原本还写了更严的值
-    expect(config.onReviewUnavailable).toBe("review");
-    expect(config.onUnresolvedFacts).toBe("review");
+    expect(config.onReviewUnavailable).toBe("ask");
+    expect(config.onUnresolvedFacts).toBe("ask");
   });
 
   it("`permission[\"*\"]` 是用户层规则，不改变合成的 baseline", () => {

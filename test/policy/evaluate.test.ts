@@ -185,13 +185,13 @@ describe("规则求值（FR-1~FR-10）", () => {
     ).toBe("deny");
   });
 
-  it("配置失效时 baseline 把 allow 收紧为 review（FR-51）", () => {
+  it("配置失效时 baseline 把兜底动作抬到 ask（FR-51/FR-63）", () => {
     const { call } = evaluate("read", toolFacts("read"), {
       global: {},
       globalStatus: "degraded",
     });
 
-    expect(call.action).toBe("review");
+    expect(call.action).toBe("ask");
     expect(call.decisive?.source).toBe("baseline");
   });
 
