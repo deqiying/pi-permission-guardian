@@ -168,6 +168,3 @@ CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在 `ubuntu-latest
 
 本项目使用 Apache License 2.0，全文见 [`LICENSE`](LICENSE)。
 
-## 参考源码
-
-`reference/` 下为只读查阅用的第三方源码，**不是运行依赖**，已加入 `.gitignore`。来源与版本见 [reference/README.md](reference/README.md)。
