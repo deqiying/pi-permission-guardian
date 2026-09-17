@@ -8,6 +8,9 @@ name: CI
 # 触发策略：只在推送发布版本 tag（v*）时执行（加手动 workflow_dispatch）；PR 与 main 直推不触发。
 # 这与 scripts/release.sh 的流程一致——推送分支 + 推送 tag 只产生一轮门禁，而不是两轮。
 # 代价是 PR 没有 CI 门禁：交付前需在本地跑完同一组命令（见 README「开发」）。
+#
+# 发布（jobs.publish）：verify 双平台全绿后，用 npm trusted publishing（OIDC）把 tag 对应的版本发到 npm。
+# npm 侧的一次性配置、演练与失败重跑见 docs/release.md。
 on:
   push:
     tags: ["v*"]
@@ -55,3 +58,55 @@ jobs:
       # 漂移检查必须在那之前完成，否则会被就地修好而失去意义。
       - name: Verify package contents
         run: npm run check:pack
+
+  # 发布：认证走 npm trusted publishing（OIDC），不需要长期 token，provenance 自动生成。
+  # 只有推送 v* tag 才会走到这里，且 verify 双平台全绿是前置条件。
+  publish:
+    name: publish (npm)
+    # 手动 workflow_dispatch 的 ref 是分支，不应发布——发布只由 tag 触发。
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # OIDC：npm CLI 检测到 Actions 环境后会拿它换取短期发布令牌。
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # 发布 job 单独用 Node 24：它内置 npm 11.x，而 trusted publishing 要求 npm CLI ≥ 11.5.1
+      # （Node 22.x 内置的 npm 10.9.x 不满足）。verify 双腿仍跑 22.x 以守住 engines 下限。
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24.x
+          registry-url: https://registry.npmjs.org
+          # 发布构建禁用缓存：缓存内容会影响发出去的产物。
+          package-manager-cache: false
+
+      - name: Install dependencies
+        run: npm ci
+
+      # tag 与 package.json 版本不一致就停在这里，而不是把错的版本号发上 registry。
+      # 顺带推导 dist-tag：npm 拒绝把预发布版本隐式发到 latest（必须显式 --tag）。
+      - name: Resolve release version
+        id: release
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "tag ${GITHUB_REF_NAME} 与 package.json 版本 v${version} 不一致" >&2
+            exit 1
+          fi
+          case "${version}" in
+            *-*) dist_tag="${version#*-}"; dist_tag="${dist_tag%%.*}" ;;
+            *) dist_tag="latest" ;;
+          esac
+          echo "version=${version}" >>"${GITHUB_OUTPUT}"
+          echo "dist_tag=${dist_tag}" >>"${GITHUB_OUTPUT}"
+
+      # prepack 会重新生成 schemas/guardian.schema.json，因此发出去的 schema 与 zod 同步；
+      # 漂移门禁（test 与 check:pack）已经在 verify 里跑过。
+      - name: Publish to npm
+        run: npm publish --tag "${{ steps.release.outputs.dist_tag }}"

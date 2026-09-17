@@ -64,7 +64,7 @@ pi agent 的命令执行护栏插件：**黑白名单快速裁决 + 名单外/�
 
 | 方式 | 命令 | 写入位置 |
 |---|---|---|
-| npm（发布后） | `pi install npm:pi-permission-guardian` | `<agentDir>/settings.json` |
+| npm（`latest`） | `pi install npm:pi-permission-guardian` | `<agentDir>/settings.json` |
 | git（ref 固定） | `pi install git:github.com/deqiying/pi-permission-guardian@v0.1.1` | `<agentDir>/settings.json` |
 | 本地路径 | `pi install /absolute/path/to/pi-permission-guardian` | `<agentDir>/settings.json`，只引用不复制 |
 | 项目级 | 以上任一命令加 `-l` | `<cwd>/.pi/settings.json`，随仓库共享；项目需被信任 |
@@ -161,6 +161,8 @@ Schema：[`schemas/guardian.schema.json`](schemas/guardian.schema.json)。
 运行时依赖是 `zod`（配置 schema 唯一真源）与 `tree-sitter-bash` / `web-tree-sitter`（bash 事实提取）；pi 相关包均为 `peerDependencies`，由宿主提供。
 
 CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在 `ubuntu-latest` 与 `windows-latest` 上依次执行 `typecheck` → `test` → `validate:config` → `check:pack`；触发方式是**推送发布版本 tag（`v*`）**，PR 与 `main` 直推不触发，所以推送前请在本地跑完同一组命令。真实 pi 会话冒烟不在 CI 内，属于交付前的人工门禁。
+
+发布也随这条链走：verify 双腿全绿后，`publish` job 用 npm trusted publishing（OIDC）把 tag 对应的版本发出去，不需要长期 token，provenance 自动生成。npm 侧的一次性配置、首次演练与失败重跑见 [`docs/release.md`](docs/release.md)。
 
 仓库用 [`.gitattributes`](.gitattributes) 把文本文件统一钉在 LF：schema 漂移门禁用例是字节比对，Windows 上被 `core.autocrlf` 转成 CRLF 会导致假失败。
 

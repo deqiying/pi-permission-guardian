@@ -72,6 +72,6 @@ git tag "${tag_name}"
 
 # 分支名不是 main（如 release/x）时，推送命令里的分支要跟着改。
 printf '已在 %s 上准备发布 %s：提交 + 本地 tag %s（未推送）。\n' "${branch}" "${version}" "${tag_name}"
-printf '推送后 CI 会走 tag 触发流程：\n'
+printf '推送后 CI 会先跑双平台门禁，再自动发布到 npm（npm 侧配置见 docs/release.md）：\n'
 printf '  git push origin %s\n' "${branch}"
 printf '  git push origin %s\n' "${tag_name}"

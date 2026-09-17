@@ -151,7 +151,7 @@ try {
 
     # 分支名不是 main（如 release/x）时，推送命令里的分支要跟着改。
     Write-Host "已在 $branch 上准备发布 $Version：提交 + 本地 tag $tagName（未推送）。"
-    Write-Host "推送后 CI 会走 tag 触发流程："
+    Write-Host "推送后 CI 会先跑双平台门禁，再自动发布到 npm（npm 侧配置见 docs/release.md）："
     Write-Host "  git push origin $branch"
     Write-Host "  git push origin $tagName"
 }

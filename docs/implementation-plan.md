@@ -365,6 +365,7 @@ schema generation script
 3. README 增加安装（npm / git / 本地路径、全局与 `-l` 项目级、`pi -e` 试用）、卸载回滚、`/perm` 命令、已知限制与平台验证范围。
 4. CI（`.github/workflows/ci.yml`）在 `ubuntu-latest` 与 `windows-latest` 上依次执行 typecheck、test、`validate:config`、`check:pack`（含 package dry-run）；触发条件是推送发布版本 tag（`v*`）或手动 `workflow_dispatch`，PR 与 `main` 直推不触发（一次发布只跑一轮门禁）。
 5. 真实 pi 0.85.1 会话冒烟：不依赖评审模型与交互 UI 的环节已在 Windows 执行并记录在 `docs/smoke-test.md`（安装/卸载、加载、`/perm status`、S1、S2、S6 未配置分支、非法配置 fail-closed、审计落盘）；S3、S4 的工具路径、S5、S7 与真实超时分支需人工执行，同文档给出步骤、期望与未验证的边界。
+6. 发布随同一条链：verify 双腿全绿后由 `publish` job 用 npm trusted publishing（OIDC）执行 `npm publish`（无长期 token，provenance 自动生成，发布前断言 tag 与 `package.json` 版本一致，预发布版本按预发布标识推导 dist-tag）；npm 侧配置与演练见 `docs/release.md`。
 
 ### 验证门禁
 
