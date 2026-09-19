@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "deqiying.pi-permission-guardian",
   "name": "pi-permission-guardian",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Permission guardrail extension for the pi coding agent.",
   "author": "deqiying",
   "homepage": "https://github.com/deqiying/pi-permission-guardian",
