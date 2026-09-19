@@ -38,7 +38,7 @@ if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction Sile
 
 $usage = "用法: pwsh -File scripts/release.ps1 <semver>   例: pwsh -File scripts/release.ps1 0.2.0"
 $versionPattern = '^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
-$versionFiles = @("package.json", "package-lock.json")
+$versionFiles = @("package.json", "package-lock.json", "pi-desktop/manifest.json")
 
 if ([string]::IsNullOrWhiteSpace($Version)) {
     throw $usage
@@ -125,6 +125,8 @@ try {
 
     # npm version 是唯一同时正确改写 package.json 与 package-lock.json 的路径。
     Invoke-Checked npm @("version", $Version, "--no-git-tag-version") *> $null
+    # PI-Desktop 的 manifest 与 npm 版本共用同一个发布版本。
+    Invoke-Checked npm @("run", "sync:plugin-version", "--", $Version) *> $null
 
     $gitAddArgs = @("add", "--") + $versionFiles
     Invoke-Checked git $gitAddArgs

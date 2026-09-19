@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import { join } from "node:path";
 
 /**
@@ -9,6 +10,21 @@ import { join } from "node:path";
 
 export const EXTENSION_DIR_NAME = "pi-permission-guardian";
 export const CONFIG_FILE_NAME = "config.json";
+
+/** 与 pi 默认位置一致；PI-Desktop 没有 CLI 的 getAgentDir()，因此由扩展本地解析。 */
+export function defaultAgentDir(): string {
+  const configured = process.env.PI_CODING_AGENT_DIR?.trim();
+  if (configured === undefined || configured.length === 0) {
+    return join(homedir(), ".pi", "agent");
+  }
+  if (configured === "~") {
+    return homedir();
+  }
+  if (configured.startsWith("~/") || configured.startsWith("~\\")) {
+    return join(homedir(), configured.slice(2));
+  }
+  return configured;
+}
 
 /** `<agentDir>/extensions/pi-permission-guardian` */
 export function globalExtensionDir(agentDir: string): string {

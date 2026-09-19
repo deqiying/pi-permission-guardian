@@ -1,4 +1,7 @@
+import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Language, Parser, Tree } from "web-tree-sitter";
 
 /**
@@ -32,7 +35,7 @@ export interface BashParserStatus {
 
 type ParserState =
   | { kind: "idle" }
-  | { kind: "loading"; promise: Promise<BashParserHandle> }
+  | { kind: "loading"; promise: Promise<BashParserHandle>; sequence: number }
   | { kind: "ready"; handle: BashParserHandle };
 
 let state: ParserState = { kind: "idle" };
@@ -41,6 +44,7 @@ let lastError: string | undefined;
 let wasmPaths: { treeSitter: string; bash: string } | undefined;
 /** dispose 的代次：用于识别"加载还没完成就被释放"。 */
 let generation = 0;
+let loadSequence = 0;
 
 /**
  * 取得已就绪的解析器；尚未完成初始化时返回 undefined。
@@ -62,8 +66,10 @@ export function ensureBashParser(): Promise<BashParserHandle> {
     return state.promise;
   }
   attempts += 1;
-  state = { kind: "loading", promise: loadParser() };
-  return state.promise;
+  const sequence = ++loadSequence;
+  const promise = loadParser(sequence);
+  state = { kind: "loading", promise, sequence };
+  return promise;
 }
 
 /** 预热：失败只记录状态，不抛出（调用方是生命周期钩子）。 */
@@ -112,34 +118,61 @@ export function parseBashWith(handle: BashParserHandle, text: string): Tree | un
   return handle.parser.parse(text) ?? undefined;
 }
 
-async function loadParser(): Promise<BashParserHandle> {
+async function loadParser(sequence: number): Promise<BashParserHandle> {
   const startedAt = generation;
+  let parser: Parser | undefined;
   try {
-    const require = createRequire(import.meta.url);
-    const treeSitterWasm = require.resolve("web-tree-sitter/web-tree-sitter.wasm");
-    const bashWasm = require.resolve("tree-sitter-bash/tree-sitter-bash.wasm");
+    const treeSitterWasm = resolveWasmAsset(
+      "web-tree-sitter/web-tree-sitter.wasm",
+      "web-tree-sitter.wasm",
+    );
+    const bashWasm = resolveWasmAsset(
+      "tree-sitter-bash/tree-sitter-bash.wasm",
+      "tree-sitter-bash.wasm",
+    );
     wasmPaths = { treeSitter: treeSitterWasm, bash: bashWasm };
 
     const { Parser: TreeSitterParser, Language: TreeSitterLanguage } =
       await import("web-tree-sitter");
     await TreeSitterParser.init({ locateFile: () => treeSitterWasm });
-    const parser = new TreeSitterParser();
+    const createdParser = new TreeSitterParser();
+    parser = createdParser;
     const language = await TreeSitterLanguage.load(bashWasm);
-    parser.setLanguage(language);
+    createdParser.setLanguage(language);
 
-    const handle: BashParserHandle = { parser, language };
+    const handle: BashParserHandle = { parser: createdParser, language };
     if (startedAt !== generation) {
       // 加载期间被 dispose：不复活，直接释放。
-      parser.delete();
+      createdParser.delete();
+      parser = undefined;
       throw new Error("解析器在加载期间被释放");
     }
     state = { kind: "ready", handle };
+    parser = undefined;
     lastError = undefined;
     return handle;
   } catch (error) {
+    if (parser !== undefined) {
+      parser.delete();
+      parser = undefined;
+    }
     // 关键：失败不缓存成 ready，状态回到 idle，下一次调用可重试。
     lastError = error instanceof Error ? error.message : String(error);
-    state = { kind: "idle" };
+    if (state.kind === "loading" && state.sequence === sequence) {
+      state = { kind: "idle" };
+    }
+    throw error;
+  }
+}
+function resolveWasmAsset(specifier: string, packagedName: string): string {
+  const require = createRequire(import.meta.url);
+  try {
+    return require.resolve(specifier);
+  } catch (error) {
+    const packagedPath = join(dirname(fileURLToPath(import.meta.url)), "assets", packagedName);
+    if (existsSync(packagedPath)) {
+      return packagedPath;
+    }
     throw error;
   }
 }

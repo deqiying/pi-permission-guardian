@@ -1,12 +1,12 @@
-import {
-  type ExtensionAPI,
-  type ExtensionContext,
-  type MessageEndEvent,
-  type ToolResultEvent,
-  getAgentDir,
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+  MessageEndEvent,
+  ToolResultEvent,
 } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 
+import { defaultAgentDir } from "../config/paths.ts";
 import { AuditLogger } from "../audit/logger.ts";
 import { resetBreaker } from "../decision/breaker.ts";
 import { createDecisionEngine } from "../decision/pipeline.ts";
@@ -64,7 +64,7 @@ export function registerGuardian(
     pi,
     runtime,
     audit,
-    getAgentDir: deps.getAgentDir ?? ((): string => getAgentDir()),
+    getAgentDir: deps.getAgentDir ?? defaultAgentDir,
     warn: deps.warn,
   });
 

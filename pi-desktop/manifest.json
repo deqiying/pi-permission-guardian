@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "deqiying.pi-permission-guardian",
+  "name": "pi-permission-guardian",
+  "version": "0.1.5",
+  "description": "Permission guardrail extension for the pi coding agent.",
+  "author": "deqiying",
+  "homepage": "https://github.com/deqiying/pi-permission-guardian",
+  "repository": "https://github.com/deqiying/pi-permission-guardian",
+  "main": "main.js",
+  "permissions": [
+    "agent.extension"
+  ],
+  "contributes": {
+    "agentExtensions": [
+      "extensions/guardian.js"
+    ]
+  }
+}

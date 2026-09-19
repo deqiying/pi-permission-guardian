@@ -47,6 +47,8 @@
     "gen:corpus": "node --experimental-strip-types scripts/gen-bash-corpus.ts",
     "validate:config": "node --experimental-strip-types scripts/validate-config.ts",
     "check:pack": "node --experimental-strip-types scripts/check-pack.ts",
+    "build:plugin": "node --experimental-strip-types scripts/build-plugin.ts",
+    "sync:plugin-version": "node --experimental-strip-types scripts/sync-plugin-version.ts",
     "prepack": "npm run gen:schema"
   },
   "dependencies": {
@@ -63,6 +65,7 @@
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.85.1",
     "@types/node": "22.19.19",
+    "esbuild": "^0.28.1",
     "typescript": "5.9.3",
     "vitest": "^4.1.11"
   }

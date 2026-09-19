@@ -55,9 +55,11 @@ branch="$(git rev-parse --abbrev-ref HEAD)"
 
 # npm version 是唯一同时正确改写 package.json 与 package-lock.json 的路径。
 npm version "${version}" --no-git-tag-version >/dev/null
+# PI-Desktop 的 manifest 与 npm 版本共用同一个发布版本。
+npm run sync:plugin-version -- "${version}" >/dev/null
 
-git add -- package.json package-lock.json
-if git diff --cached --quiet -- package.json package-lock.json; then
+git add -- package.json package-lock.json pi-desktop/manifest.json
+if git diff --cached --quiet -- package.json package-lock.json pi-desktop/manifest.json; then
   printf 'npm version 未产生可提交的版本改动，已中止。\n' >&2
   exit 1
 fi

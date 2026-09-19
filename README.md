@@ -145,6 +145,7 @@ Schema：[`schemas/guardian.schema.json`](schemas/guardian.schema.json)。
 | `npm run gen:schema` | 从 `src/config/schema.ts`（zod 唯一真源）重新生成 `schemas/guardian.schema.json` |
 | `npm run validate:config` | 校验官方参考配置是严格 JSON、且同时通过 zod 与提交版 schema |
 | `npm run check:pack` | 执行 `npm pack --dry-run` 并断言 tarball 内容：必需文件、入口的相对 import 闭包、不含仓库专属目录，同时检测提交版 schema 是否被 `prepack` 就地修过 |
+| `npm run build:plugin` | 生成 `dist/pi-desktop/`：PI-Desktop manifest、扩展 bundle 与 WASM 资源；CI 随版本 tag 打成 `.piplug` 并上传到 GitHub Release |
 
 修改配置结构时必须先改 zod schema，再跑 `gen:schema`；提交版 schema 与生成结果不一致时测试会失败（FR-57）。`prepack` 会在打包前重新生成 schema，因此 `check:pack` 在 CI 里排在最后。
 
@@ -152,7 +153,7 @@ Schema：[`schemas/guardian.schema.json`](schemas/guardian.schema.json)。
 
 CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在 `ubuntu-latest` 与 `windows-latest` 上依次执行 `typecheck` → `test` → `validate:config` → `check:pack`；触发方式是**推送发布版本 tag（`v*`）**，PR 与 `main` 直推不触发，所以推送前请在本地跑完同一组命令。
 
-发布也随这条链走：verify 双腿全绿后，`publish` job 用 npm trusted publishing（OIDC）把 tag 对应的版本发出去，不需要长期 token，provenance 自动生成。npm 侧的一次性配置、首次演练与失败重跑见 [`docs/release.md`](docs/release.md)。
+发布也随这条链走：verify 双腿全绿后，`publish` job 用 npm trusted publishing（OIDC）发布 npm 包，`publish-plugin` job 用固定 PI-Desktop devkit 生成 `.piplug` 并上传到同 tag 的 GitHub Release。npm 侧的一次性配置、首次演练与失败重跑见 [`docs/release.md`](docs/release.md)。
 
 仓库用 [`.gitattributes`](.gitattributes) 把文本文件统一钉在 LF：schema 漂移门禁用例是字节比对，Windows 上被 `core.autocrlf` 转成 CRLF 会导致假失败。
 

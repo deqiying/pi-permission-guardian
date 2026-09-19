@@ -59,10 +59,12 @@ export function createSessionController(
 
   function refreshConfig(ctx: ExtensionContext): ResolvedConfig {
     const agentDir = deps.getAgentDir();
+    const projectTrusted =
+      typeof ctx.isProjectTrusted === "function" ? ctx.isProjectTrusted() : true;
     const config = loadConfig({
       cwd: ctx.cwd,
       agentDir,
-      projectTrusted: ctx.isProjectTrusted(),
+      projectTrusted,
     });
 
     runtime.config = config;

@@ -1,16 +1,10 @@
 name: CI
 
-# M7 门禁（docs/implementation-plan.md §10）：typecheck、test、配置/schema 校验、
-# 打包内容校验（check:pack 内部执行 `npm pack --dry-run`，并断言 tarball 内容）。
-# 双平台：Windows 分支上有平台条件逻辑（路径归一、MSYS 形式、UNC 不 realpath、
-# 临时目录清理），只在 Ubuntu 上跑会漏掉这些分支的真实行为。
+# M7 门禁：typecheck、test、配置/schema 校验、npm 包内容校验。
+# 双平台：Windows 分支上有平台条件逻辑，只在 Ubuntu 上跑会漏掉真实行为。
 #
-# 触发策略：只在推送发布版本 tag（v*）时执行（加手动 workflow_dispatch）；PR 与 main 直推不触发。
-# 这与 scripts/release.sh 的流程一致——推送分支 + 推送 tag 只产生一轮门禁，而不是两轮。
-# 代价是 PR 没有 CI 门禁：交付前需在本地跑完同一组命令（见 README「开发」）。
-#
-# 发布（jobs.publish）：verify 双平台全绿后，用 npm trusted publishing（OIDC）把 tag 对应的版本发到 npm。
-# npm 侧的一次性配置、演练与失败重跑见 docs/release.md。
+# 触发策略：只在推送发布版本 tag（v*）时执行（加手动 workflow_dispatch）。
+# verify 双平台全绿后，分别发布 npm 包和 PI-Desktop .piplug Release asset。
 on:
   push:
     tags: ["v*"]
@@ -59,8 +53,7 @@ jobs:
       - name: Verify package contents
         run: npm run check:pack
 
-  # 发布：认证走 npm trusted publishing（OIDC），不需要长期 token，provenance 自动生成。
-  # 只有推送 v* tag 才会走到这里，且 verify 双平台全绿是前置条件。
+  # 发布 npm：认证走 trusted publishing（OIDC），不需要长期 token，provenance 自动生成。
   publish:
     name: publish (npm)
     # 手动 workflow_dispatch 的 ref 是分支，不应发布——发布只由 tag 触发。
@@ -69,15 +62,13 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # OIDC：npm CLI 检测到 Actions 环境后会拿它换取短期发布令牌。
       id-token: write
 
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
-      # 发布 job 单独用 Node 24：它内置 npm 11.x，而 trusted publishing 要求 npm CLI ≥ 11.5.1
-      # （Node 22.x 内置的 npm 10.9.x 不满足）。verify 双腿仍跑 22.x 以守住 engines 下限。
+      # 发布 job 单独用 Node 24：它内置 npm 11.x，而 trusted publishing 要求 npm CLI >= 11.5.1。
       - name: Setup Node
         uses: actions/setup-node@v7
         with:
@@ -110,3 +101,112 @@ jobs:
       # 漂移门禁（test 与 check:pack）已经在 verify 里跑过。
       - name: Publish to npm
         run: npm publish --tag "${{ steps.release.outputs.dist_tag }}"
+
+  # PI-Desktop 分发：manifest/main.js 与扩展 bundle 放进 staging，
+  # 再由官方 devkit 生成 store-compressed .piplug，并上传到同名 GitHub Release。
+  publish-plugin:
+    name: publish (PI-Desktop plugin)
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout plugin repository
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22.x
+          cache: npm
+
+      - name: Install plugin dependencies
+        run: npm ci
+
+      - name: Resolve release version
+        id: release
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "tag ${GITHUB_REF_NAME} 与 package.json 版本 v${version} 不一致" >&2
+            exit 1
+          fi
+          echo "version=${version}" >>"${GITHUB_OUTPUT}"
+
+      - name: Build plugin staging directory
+        run: npm run build:plugin
+
+      # 使用固定 commit 的 PI-Desktop devkit，确保 .piplug 格式和安装校验与主仓库一致。
+      - name: Checkout PI-Desktop plugin devkit
+        uses: actions/checkout@v7
+        with:
+          repository: vastsa/PI-Desktop
+          ref: 0854ae0715965a10a55747363fb1c078cfa74cd6
+          path: .pi-desktop-source
+          sparse-checkout: |
+            package.json
+            pnpm-lock.yaml
+            pnpm-workspace.yaml
+            tsconfig.base.json
+            packages/plugin-sdk
+            packages/plugin-devkit
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.18.0
+          run_install: false
+
+      - name: Install PI-Desktop plugin devkit
+        working-directory: .pi-desktop-source
+        run: pnpm install --frozen-lockfile --filter @pi-desktop/plugin-devkit...
+
+      - name: Build PI-Desktop plugin devkit
+        working-directory: .pi-desktop-source
+        run: |
+          pnpm --filter @pi-desktop/plugin-sdk build
+          pnpm --filter @pi-desktop/plugin-devkit build
+
+      - name: Check plugin staging directory
+        run: node .pi-desktop-source/packages/plugin-devkit/dist/cli.js check dist/pi-desktop
+
+      - name: Pack .piplug
+        run: node .pi-desktop-source/packages/plugin-devkit/dist/cli.js pack dist/pi-desktop --out dist/plugin
+
+      - name: Calculate plugin artifact metadata
+        id: artifact
+        run: |
+          asset="dist/plugin/deqiying.pi-permission-guardian-${{ steps.release.outputs.version }}.piplug"
+          test -f "${asset}"
+          echo "path=${asset}" >>"${GITHUB_OUTPUT}"
+          echo "name=$(basename "${asset}")" >>"${GITHUB_OUTPUT}"
+          echo "sha256=$(sha256sum "${asset}" | cut -d' ' -f1)" >>"${GITHUB_OUTPUT}"
+          echo "size_bytes=$(wc -c < "${asset}")" >>"${GITHUB_OUTPUT}"
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release create "${GITHUB_REF_NAME}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --verify-tag \
+              --title "${GITHUB_REF_NAME}" \
+              --generate-notes
+          fi
+          gh release upload "${GITHUB_REF_NAME}" "${{ steps.artifact.outputs.path }}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber
+
+      - name: Write plugin artifact summary
+        run: |
+          {
+            echo "### PI-Desktop plugin"
+            echo
+            echo "- Asset: [${{ steps.artifact.outputs.name }}](https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${{ steps.artifact.outputs.name }})"
+            echo "- Version: ${{ steps.release.outputs.version }}"
+            echo "- SHA-256: \\`${{ steps.artifact.outputs.sha256 }}\\`"
+            echo "- Size: ${{ steps.artifact.outputs.size_bytes }} bytes"
+          } >>"${GITHUB_STEP_SUMMARY}"
