@@ -150,9 +150,9 @@ jobs:
             pnpm-lock.yaml
             pnpm-workspace.yaml
             tsconfig.base.json
+            patches
             packages/plugin-sdk
             packages/plugin-devkit
-
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
